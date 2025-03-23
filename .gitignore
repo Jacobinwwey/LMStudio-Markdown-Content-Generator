@@ -1,0 +1,49 @@
+# PowerShell script logs and temporary files
+*.log
+*.tmp
+*.temp
+*_log.txt
+Retry_*.log
+Error_*.json
+Timeout_*.log
+
+# Raw content files
+*.raw
+
+# Debug dumps
+*_dump.json
+*_request.json
+*_response.json
+
+# Environment and configuration files
+.env
+*.config.local
+
+# Processed markdown files (optional - uncomment if you don't want to track processed files)
+# *_processed.md
+
+# System files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# PowerShell module files
+*.psd1
+*.psm1
+*.ps1xml
+*.psc1
+
+# Temporary PowerShell files
+*.pssc
+*.psrc
+*.mshxml
+
+# Windows-specific
+$RECYCLE.BIN/
