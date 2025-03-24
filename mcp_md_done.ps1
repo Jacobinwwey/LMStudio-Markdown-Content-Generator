@@ -77,6 +77,41 @@ $env:LMSTUDIO_API_KEY = 'EMPTY'
 # Bypass SSL certificate validation (use with caution)
 [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
 
+# Add cookie handling function
+function Initialize-CookieContainer {
+    [CmdletBinding()]
+    param()
+    
+    try {
+        # Create a global cookie container to handle cookie consent popups
+        $Global:CookieContainer = New-Object System.Net.CookieContainer
+        
+        # Add common cookie consent values
+        $cookieConsent = New-Object System.Net.Cookie
+        $cookieConsent.Name = "cookieconsent_status"
+        $cookieConsent.Value = "dismiss"
+        $cookieConsent.Domain = ".example.org"
+        $Global:CookieContainer.Add($cookieConsent)
+        
+        # Add GDPR consent cookie
+        $gdprConsent = New-Object System.Net.Cookie
+        $gdprConsent.Name = "euconsent"
+        $gdprConsent.Value = "accepted"
+        $gdprConsent.Domain = ".example.org"
+        $Global:CookieContainer.Add($gdprConsent)
+        
+        Write-Host "[INFO] Cookie container initialized for handling consent popups"
+        return $true
+    }
+    catch {
+        Write-Warning "Failed to initialize cookie container: $($_.Exception.Message)"
+        return $false
+    }
+}
+
+# Initialize cookie container at script start
+Initialize-CookieContainer
+
 function Get-ValidMarkdownFiles {
     [CmdletBinding()]
     param()
@@ -783,7 +818,13 @@ function Invoke-WebContentFetch {
             "Connection" = "keep-alive"
             "Upgrade-Insecure-Requests" = "1"
             "Cache-Control" = "max-age=0"
+            # Add cookie consent header
+            "Cookie" = "cookieconsent_status=dismiss; euconsent=accepted"
         }
+                
+        # Create a WebSession with our cookie container
+        $webSession = New-Object Microsoft.PowerShell.Commands.WebRequestSession
+        $webSession.Cookies = $Global:CookieContainer
         
         if ($DEBUG_CONFIG.LogRequests) {
             Write-Host "[DEBUG] Fetching content from: $Url"
@@ -828,7 +869,7 @@ function Invoke-WebContentFetch {
                 
                 try {
                     # Try using Invoke-WebRequest with relaxed SSL validation
-                    $wikiResponse = Invoke-WebRequest -Uri $Url -Headers $headers -UseBasicParsing -TimeoutSec 30
+                    $wikiResponse = Invoke-WebRequest -Uri $Url -Headers $headers -UseBasicParsing -TimeoutSec 30 -WebSession $webSession
                 
                     if ($wikiResponse.StatusCode -eq 200) {
                         # Extract text from HTML content
@@ -864,7 +905,8 @@ function Invoke-WebContentFetch {
             $accessBlocked = $false
             
             try {
-                $response = Invoke-WebRequest -Uri $Url -Headers $headers -TimeoutSec 30 -MaximumRedirection 10
+                # Use WebSession parameter to pass cookie container
+                $response = Invoke-WebRequest -Uri $Url -Headers $headers -TimeoutSec 30 -MaximumRedirection 10 -WebSession $webSession
             }
             catch {
                 $errorMessage = $_.Exception.Message
