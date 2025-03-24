@@ -10,8 +10,9 @@ Write-Host "Press Ctrl+C to stop monitoring" -ForegroundColor Yellow
 while ($retryCount -lt $maxRetries) {
     try {
         Write-Host "Attempt $($retryCount + 1) of $($maxRetries): Starting script..." -ForegroundColor Cyan
-        # 使用 pwsh 命令来启动 PowerShell 7
-        $process = Start-Process pwsh -ArgumentList "-File `"$scriptPath`"" -PassThru -NoNewWindow
+        # Start PowerShell 7 with elevated privileges to run the script
+        # When using -Verb RunAs, we can't use -NoNewWindow
+        $process = Start-Process pwsh -ArgumentList "-File `"$scriptPath`"" -PassThru -Verb RunAs
         
         # Wait for the process to exit
         $process.WaitForExit()
