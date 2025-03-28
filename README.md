@@ -93,6 +93,11 @@ $SCHEDULE_CONFIG = @{
    # Specify destination for processed files
    .\mcp_md_done.ps1 -DestinationPath "E:\Processed_Files"
 
+   # Stable usage for multi md files and format correction
+   .\monitor_script.ps1
+   python .\mermaid.py
+
+
 ## How It Works
 1. The script scans the current directory for markdown files
    

@@ -367,6 +367,43 @@ function Start-CountdownTimer {
     Write-Progress -Activity $Message -Completed
 }
 
+function Invoke-WebRequestWithTimeout {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Uri,
+        [hashtable]$Headers,
+        [int]$MaximumRedirection = 10,
+        [switch]$UseBasicParsing,
+        [int]$TimeoutSeconds = 30
+    )
+    
+    $scriptBlock = {
+        param($Uri, $Headers, $MaximumRedirection, $UseBasicParsing)
+        
+        # Create a new WebRequestSession inside this runspace
+        $webSession = New-Object Microsoft.PowerShell.Commands.WebRequestSession
+        
+        # Build parameters for Invoke-WebRequest
+        $params = @{
+            Uri = $Uri
+            Headers = $Headers
+            MaximumRedirection = $MaximumRedirection
+            WebSession = $webSession
+        }
+        
+        if ($UseBasicParsing) {
+            $params.Add('UseBasicParsing', $true)
+        }
+        
+        # Execute the web request
+        Invoke-WebRequest @params
+    }
+    
+    # Call our modified timeout function
+    Invoke-ProcessWithTimeout -ScriptBlock $scriptBlock -TimeoutSeconds $TimeoutSeconds -ArgumentList @($Uri, $Headers, $MaximumRedirection, $UseBasicParsing)
+}
+
 function Invoke-ProcessWithTimeout {
     [CmdletBinding()]
     param(
@@ -375,23 +412,51 @@ function Invoke-ProcessWithTimeout {
         
         [Parameter(Mandatory)]
         [ValidateRange(1, 2147483647)]
-        [int]$TimeoutSeconds
+        [int]$TimeoutSeconds,
+        
+        [Parameter()]
+        [object[]]$ArgumentList
     )
 
-    $job = Start-Job -ScriptBlock $ScriptBlock
-    try {
-        $job | Wait-Job -Timeout $TimeoutSeconds | Out-Null
-        
-        if ($job.State -eq 'Running') {
-            throw "Process timeout after $TimeoutSeconds seconds"
+    # Create a runspace for the script to run in
+    $runspace = [runspacefactory]::CreateRunspace()
+    $runspace.Open()
+    
+    # Create PowerShell instance to run in the runspace
+    $powershell = [powershell]::Create()
+    $powershell.Runspace = $runspace
+    
+    # Add the script and arguments
+    $powershell.AddScript($ScriptBlock)
+    foreach ($arg in $ArgumentList) {
+        $powershell.AddArgument($arg)
+    }
+    
+    # Start the async operation
+    $asyncResult = $powershell.BeginInvoke()
+    
+    # Wait for completion or timeout
+    if ($asyncResult.AsyncWaitHandle.WaitOne($TimeoutSeconds * 1000)) {
+        # Operation completed within timeout
+        try {
+            return $powershell.EndInvoke($asyncResult)
         }
-        
-        return Receive-Job -Job $job
+        catch {
+            throw $_
+        }
+    }
+    else {
+        # Operation timed out
+        $powershell.Stop()
+        throw "Process timeout after $TimeoutSeconds seconds"
     }
     finally {
-        $job | Remove-Job -Force
+        $powershell.Dispose()
+        $runspace.Close()
+        $runspace.Dispose()
     }
 }
+
 
 function Invoke-LMStudioRequest {
     [CmdletBinding()]
@@ -856,21 +921,21 @@ function Invoke-WebContentFetch {
             if ($Url -match "wikipedia\.org") {
                 Write-Host "[INFO] Using alternative method for Wikipedia content"
                 
-                # After (Local HTTP - remove TLS requirements)
-                # Remove TLS configuration entirely for local HTTP
-                [System.Net.ServicePointManager]::SecurityProtocol = @(
-                    [System.Net.SecurityProtocolType]::SystemDefault
-                )
-                # Environment configuration - set this before running the script
-                # $env:LMSTUDIO_API_KEY = 'YOUR_API_KEY'
-
-                # Bypass SSL certificate validation (use with caution)
-                [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+                # Force TLS 1.2 and disable certificate validation for Wikipedia
+                [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12
+                
+                # Create a callback to bypass SSL certificate validation
+                $certCallback = [System.Net.ServicePointManager]::ServerCertificateValidationCallback
+                [System.Net.ServicePointManager]::ServerCertificateValidationCallback = {$true}
                 
                 try {
-                    # Try using Invoke-WebRequest with relaxed SSL validation
-                    $wikiResponse = Invoke-WebRequest -Uri $Url -Headers $headers -UseBasicParsing -TimeoutSec 30 -WebSession $webSession
-                
+                    # Use Invoke-ProcessWithTimeout to enforce a 30-second timeout for this specific request
+                    $scriptBlock = {
+                        param($Url, $Headers, $WebSession)
+                        Invoke-WebRequest -Uri $Url -Headers $Headers -UseBasicParsing -WebSession $WebSession
+                    }
+                    
+                    $wikiResponse = Invoke-WebRequestWithTimeout -Uri $Url -Headers $headers -UseBasicParsing -TimeoutSeconds 30
                     if ($wikiResponse.StatusCode -eq 200) {
                         # Extract text from HTML content
                         $html = $wikiResponse.Content
@@ -888,7 +953,11 @@ function Invoke-WebContentFetch {
                         return $text
                     }
                 }
-                catch {
+                catch [System.Management.Automation.RuntimeException] {
+                    if ($_.Exception.Message -match "timeout") {
+                        Write-Host "[WARNING] Wikipedia request timed out after 30 seconds: $Url"
+                        return "Content skipped: Request timed out after 30 seconds"
+                    }
                     Write-Host "[WARNING] Wikipedia access with relaxed SSL failed: $($_.Exception.Message)"
                 }
                 finally {
@@ -905,10 +974,20 @@ function Invoke-WebContentFetch {
             $accessBlocked = $false
             
             try {
-                # Use WebSession parameter to pass cookie container
-                $response = Invoke-WebRequest -Uri $Url -Headers $headers -TimeoutSec 30 -MaximumRedirection 10 -WebSession $webSession
+                # Use Invoke-ProcessWithTimeout to enforce a 30-second timeout for this specific request
+                $scriptBlock = {
+                    param($Url, $Headers, $WebSession)
+                    Invoke-WebRequest -Uri $Url -Headers $Headers -MaximumRedirection 10 -WebSession $WebSession
+                }
+                
+                $response = Invoke-WebRequestWithTimeout -Uri $Url -Headers $headers -MaximumRedirection 10 -TimeoutSeconds 30
             }
-            catch {
+            catch [System.Management.Automation.RuntimeException] {
+                if ($_.Exception.Message -match "timeout") {
+                    Write-Host "[WARNING] Request timed out after 30 seconds: $Url"
+                    return "Content skipped: Request timed out after 30 seconds"
+                }
+                
                 $errorMessage = $_.Exception.Message
                 
                 # Check if access is blocked (403 Forbidden)
@@ -954,7 +1033,13 @@ function Invoke-WebContentFetch {
                 $waybackUrl = "https://web.archive.org/web/2/" + $Url
                 
                 try {
-                    $archiveResponse = Invoke-WebRequest -Uri $waybackUrl -Headers $headers -TimeoutSec 45 -MaximumRedirection 10
+                    # Use Invoke-ProcessWithTimeout to enforce a 30-second timeout for archive requests
+                    $scriptBlock = {
+                        param($Url, $Headers, $WebSession)
+                        Invoke-WebRequest -Uri $Url -Headers $Headers -MaximumRedirection 10 -WebSession $WebSession
+                    }
+                    
+                    $archiveResponse = Invoke-WebRequestWithTimeout -Uri $waybackUrl -Headers $headers -MaximumRedirection 10 -TimeoutSeconds 30
                     
                     if ($archiveResponse.StatusCode -eq 200) {
                         # Extract text content from HTML
@@ -973,8 +1058,12 @@ function Invoke-WebContentFetch {
                         return "ARCHIVED CONTENT from Internet Archive:`n$text"
                     }
                 }
-                catch {
-                    Write-Host "[INFO] Internet Archive access failed: $($_.Exception.Message)"
+                catch [System.Management.Automation.RuntimeException] {
+                    if ($_.Exception.Message -match "timeout") {
+                        Write-Host "[WARNING] Internet Archive request timed out after 30 seconds: $Url"
+                    } else {
+                        Write-Host "[INFO] Internet Archive access failed: $($_.Exception.Message)"
+                    }
                 }
                 
                 # Try archive.today as a fallback
@@ -982,7 +1071,13 @@ function Invoke-WebContentFetch {
                 $archiveTodayUrl = "https://archive.ph/newest/" + $Url
                 
                 try {
-                    $archiveTodayResponse = Invoke-WebRequest -Uri $archiveTodayUrl -Headers $headers -TimeoutSec 45 -MaximumRedirection 10
+                    # Use Invoke-ProcessWithTimeout to enforce a 30-second timeout for archive requests
+                    $scriptBlock = {
+                        param($Url, $Headers, $WebSession)
+                        Invoke-WebRequest -Uri $Url -Headers $Headers -MaximumRedirection 10 -WebSession $WebSession
+                    }
+                    
+                    $archiveTodayResponse = Invoke-WebRequestWithTimeout -Uri $archiveTodayUrl -Headers $headers -MaximumRedirection 10 -TimeoutSeconds 30
                     
                     if ($archiveTodayResponse.StatusCode -eq 200) {
                         # Extract text content from HTML
@@ -1001,8 +1096,12 @@ function Invoke-WebContentFetch {
                         return "ARCHIVED CONTENT from archive.today:`n$text"
                     }
                 }
-                catch {
-                    Write-Host "[INFO] archive.today access failed: $($_.Exception.Message)"
+                catch [System.Management.Automation.RuntimeException] {
+                    if ($_.Exception.Message -match "timeout") {
+                        Write-Host "[WARNING] archive.today request timed out after 30 seconds: $Url"
+                    } else {
+                        Write-Host "[INFO] archive.today access failed: $($_.Exception.Message)"
+                    }
                 }
                 
                 # Try Google Cache as a last resort
@@ -1010,7 +1109,13 @@ function Invoke-WebContentFetch {
                 $googleCacheUrl = "https://webcache.googleusercontent.com/search?q=cache:" + $Url
                 
                 try {
-                    $googleCacheResponse = Invoke-WebRequest -Uri $googleCacheUrl -Headers $headers -TimeoutSec 45 -MaximumRedirection 10
+                    # Use Invoke-ProcessWithTimeout to enforce a 30-second timeout for archive requests
+                    $scriptBlock = {
+                        param($Url, $Headers, $WebSession)
+                        Invoke-WebRequest -Uri $Url -Headers $Headers -MaximumRedirection 10 -WebSession $WebSession
+                    }
+                    
+                    $googleCacheResponse = Invoke-WebRequestWithTimeout -Uri $googleCacheUrl -Headers $headers -MaximumRedirection 10 -TimeoutSeconds 30
                     
                     if ($googleCacheResponse.StatusCode -eq 200) {
                         # Extract text content from HTML
@@ -1029,11 +1134,15 @@ function Invoke-WebContentFetch {
                         return "ARCHIVED CONTENT from Google Cache:`n$text"
                     }
                 }
-                catch {
-                    Write-Host "[INFO] Google Cache access failed: $($_.Exception.Message)"
+                catch [System.Management.Automation.RuntimeException] {
+                    if ($_.Exception.Message -match "timeout") {
+                        Write-Host "[WARNING] Google Cache request timed out after 30 seconds: $Url"
+                    } else {
+                        Write-Host "[INFO] Google Cache access failed: $($_.Exception.Message)"
+                    }
                 }
-                
-                # If all archive services fail, try to extract metadata from the URL
+
+                                # If all archive services fail, try to extract metadata from the URL
                 if ($Url -match "researchgate\.net/publication/(\d+)_(.+)") {
                     $pubId = $Matches[1]
                     $title = $Matches[2] -replace '_', ' '
@@ -1726,13 +1835,6 @@ Remaining Files: $($files.Count)
 
         try {
             $baseName = [System.IO.Path]::GetFileNameWithoutExtension($file.Name)
-            
-            # Add validation to ensure baseName is not empty
-            if ([string]::IsNullOrWhiteSpace($baseName)) {
-                Write-Warning "Skipping file with empty name: $($file.FullName)"
-                continue
-            }
-            
             $safeBaseName = $baseName -replace '[{}£$%^]', ''
             
             # Step 1: Search based on $safeBaseName using DuckDuckGo
@@ -1894,15 +1996,8 @@ Format directly for Obsidian without markdown code blocks.
                 Timestamp   = Get-Date
             }
             
-            # Ensure we have a valid filename for the error log
-            $errorBaseName = if ([string]::IsNullOrWhiteSpace($baseName)) {
-                "Unknown_" + (Get-Date -Format "yyyyMMddHHmmss")
-            } else {
-                $baseName
-            }
-            
-            $errorInfo | ConvertTo-Json -Depth 10 | Out-File "Error_$errorBaseName.json"
-            Write-Error "Processing failed for $($file.Name). Error details logged to Error_$errorBaseName.json"
+            $errorInfo | ConvertTo-Json -Depth 10 | Out-File "Error_$baseName.json"
+            Write-Error "Processing failed for $baseName. Error details logged."
         }
 
         # Post-processing timeout check
