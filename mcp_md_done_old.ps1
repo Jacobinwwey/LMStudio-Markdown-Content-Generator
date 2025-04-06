@@ -1,154 +1,49 @@
 #Requires -Version 7.0
 <#
 .SYNOPSIS
-Automatically fill blank markdown files using multiple LLM providers with scheduled execution
+Automatically fill blank markdown files using LMStudio Reasoner API with scheduled execution
+
+.DESCRIPTION
+This script processes blank markdown files by generating comprehensive content using LM Studio's API.
+It can also perform web searches to gather information before generating content.
 
 .NOTES
 1. Requires PowerShell 7+ (install from https://aka.ms/install-powershell)
-2. Configure API keys in .env file
+2. Set API key first: $env:LMStudio_API_KEY = 'your-api-key-here'
 3. Run in directory with target markdown files
 4. Scheduling parameters controlled through $SCHEDULE_CONFIG
+
+.PARAMETER DestinationPath
+Optional. Path where processed files will be moved. Default is current directory.
+
+.EXAMPLE
+.\mcp_md_done.ps1 -DestinationPath "C:\ProcessedFiles"
 #>
 
-# Load .env file if it exists
-function Import-DotEnv {
-    param(
-        [string]$EnvFile = ".env"
-    )
-    
-    if (Test-Path $EnvFile) {
-        Write-Host "Loading configuration from $EnvFile"
-        Get-Content $EnvFile | ForEach-Object {
-            if ($_ -match '^\s*([^#][^=]+)=(.*)$') {
-                $key = $matches[1].Trim()
-                $value = $matches[2].Trim()
-                # Remove quotes if present
-                if ($value -match '^["''](.*)["'']$') {
-                    $value = $matches[1]
-                }
-                [Environment]::SetEnvironmentVariable($key, $value)
-            }
-        }
-    }
-}
-
-# Load environment variables
-Import-DotEnv
+param(
+    [string]$DestinationPath = (Get-Location).Path
+)
 
 # Configuration Constants
 $DEBUG_CONFIG = @{
-    LogRequests     = [System.Convert]::ToBoolean($env:DEBUG_LOG_REQUESTS ?? "true")
-    SaveJsonDumps   = [System.Convert]::ToBoolean($env:DEBUG_SAVE_JSON_DUMPS ?? "true")
-    ShowFullErrors  = [System.Convert]::ToBoolean($env:DEBUG_SHOW_FULL_ERRORS ?? "true")
+    LogRequests     = $true
+    SaveJsonDumps   = $true
+    ShowFullErrors  = $true
 }
 
 $SCHEDULE_CONFIG = @{
-    StartDelayHours = [double]($env:SCHEDULE_START_DELAY_HOURS ?? 0.000001)
-    TimeoutHours    = [double]($env:SCHEDULE_TIMEOUT_HOURS ?? 10000)
-    CheckInterval   = [int]($env:CHECK_INTERVAL ?? 30)
+    StartDelayHours = 0.0001
+    TimeoutHours    = 10000
+    CheckInterval   = 30
 }
 
-# LLM Provider Configuration
-$LLM_PROVIDER = $env:LLM_PROVIDER ?? "lmstudio"
-
-# Multi-provider LLM Configuration
-$LLM_CONFIG = @{
-    # LM Studio Configuration
-    lmstudio = @{
-        BaseURL         = $env:LMSTUDIO_ENDPOINT ?? "http://localhost:1234/v1/chat/completions"
-        Model           = $env:LMSTUDIO_MODEL ?? "local-model"
-        SystemMessage   = "You are a scientific reasoning expert. Analyze from multiple perspectives: physical mechanisms, mathematical models, experimental validation, and practical applications. Maintain rigorous academic standards. Please be extremely strict to mermaid format."
-        Temperature     = [double]($env:TEMPERATURE ?? 0.7)
-        MaxTokens       = [int]($env:MAX_TOKENS ?? 16384)
-        ApiKey          = $env:LMSTUDIO_API_KEY ?? "EMPTY"
-    }
-    
-    # DeepSeek Configuration
-    deepseek = @{
-        BaseURL         = $env:DEEPSEEK_ENDPOINT ?? "https://api.deepseek.com/v1/chat/completions"
-        Model           = $env:DEEPSEEK_MODEL ?? "deepseek-reasoner"
-        SystemMessage   = "You are a scientific reasoning expert. Analyze from multiple perspectives: physical mechanisms, mathematical models, experimental validation, and practical applications. Maintain rigorous academic standards. Please be extremely strict to mermaid format."
-        Temperature     = [double]($env:TEMPERATURE ?? 0.7)
-        MaxTokens       = [int]($env:MAX_TOKENS ?? 16384)
-        ApiKey          = $env:DEEPSEEK_API_KEY
-    }
-    
-    # OpenAI Configuration
-    openai = @{
-        BaseURL         = $env:OPENAI_ENDPOINT ?? "https://api.openai.com/v1/chat/completions"
-        Model           = $env:OPENAI_MODEL ?? "gpt-4o"
-        SystemMessage   = "You are a scientific reasoning expert. Analyze from multiple perspectives: physical mechanisms, mathematical models, experimental validation, and practical applications. Maintain rigorous academic standards. Please be extremely strict to mermaid format."
-        Temperature     = [double]($env:TEMPERATURE ?? 0.7)
-        MaxTokens       = [int]($env:MAX_TOKENS ?? 16384)
-        ApiKey          = $env:OPENAI_API_KEY
-    }
-    
-    # Anthropic Configuration
-    anthropic = @{
-        BaseURL         = "https://api.anthropic.com/v1/messages"
-        Model           = $env:ANTHROPIC_MODEL ?? "claude-3-5-sonnet-20241022"
-        SystemMessage   = "You are a scientific reasoning expert. Analyze from multiple perspectives: physical mechanisms, mathematical models, experimental validation, and practical applications. Maintain rigorous academic standards. Please be extremely strict to mermaid format."
-        Temperature     = [double]($env:TEMPERATURE ?? 0.7)
-        MaxTokens       = [int]($env:MAX_TOKENS ?? 16384)
-        ApiKey          = $env:ANTHROPIC_API_KEY
-    }
-    
-    # Google Configuration
-    google = @{
-        BaseURL         = "https://generativelanguage.googleapis.com/v1beta/models"
-        Model           = $env:GOOGLE_MODEL ?? "gemini-2.0-flash-exp"
-        SystemMessage   = "You are a scientific reasoning expert. Analyze from multiple perspectives: physical mechanisms, mathematical models, experimental validation, and practical applications. Maintain rigorous academic standards. Please be extremely strict to mermaid format."
-        Temperature     = [double]($env:TEMPERATURE ?? 0.7)
-        MaxTokens       = [int]($env:MAX_TOKENS ?? 16384)
-        ApiKey          = $env:GOOGLE_API_KEY
-    }
-    
-    # Mistral Configuration
-    mistral = @{
-        BaseURL         = $env:MISTRAL_ENDPOINT ?? "https://api.mistral.ai/v1/chat/completions"
-        Model           = $env:MISTRAL_MODEL ?? "mistral-large-latest"
-        SystemMessage   = "You are a scientific reasoning expert. Analyze from multiple perspectives: physical mechanisms, mathematical models, experimental validation, and practical applications. Maintain rigorous academic standards. Please be extremely strict to mermaid format."
-        Temperature     = [double]($env:TEMPERATURE ?? 0.7)
-        MaxTokens       = [int]($env:MAX_TOKENS ?? 16384)
-        ApiKey          = $env:MISTRAL_API_KEY
-    }
-    
-    # Azure OpenAI Configuration
-    azure_openai = @{
-        BaseURL         = $env:AZURE_OPENAI_ENDPOINT
-        Model           = $env:AZURE_OPENAI_MODEL ?? "gpt-4o"
-        SystemMessage   = "You are a scientific reasoning expert. Analyze from multiple perspectives: physical mechanisms, mathematical models, experimental validation, and practical applications. Maintain rigorous academic standards. Please be extremely strict to mermaid format."
-        Temperature     = [double]($env:TEMPERATURE ?? 0.7)
-        MaxTokens       = [int]($env:MAX_TOKENS ?? 16384)
-        ApiKey          = $env:AZURE_OPENAI_API_KEY
-        ApiVersion      = $env:AZURE_OPENAI_API_VERSION ?? "2025-01-01-preview"
-    }
-    
-    # Ollama Configuration
-    ollama = @{
-        BaseURL         = $env:OLLAMA_ENDPOINT ?? "http://localhost:11434/api/chat"
-        Model           = $env:OLLAMA_MODEL ?? "llama3"
-        SystemMessage   = "You are a scientific reasoning expert. Analyze from multiple perspectives: physical mechanisms, mathematical models, experimental validation, and practical applications. Maintain rigorous academic standards. Please be extremely strict to mermaid format."
-        Temperature     = [double]($env:TEMPERATURE ?? 0.7)
-        MaxTokens       = [int]($env:MAX_TOKENS ?? 16384)
-    }
-}
-
-# Set active LLM configuration
-$ACTIVE_LLM = $LLM_CONFIG[$LLM_PROVIDER]
-if (-not $ACTIVE_LLM) {
-    Write-Error "Invalid LLM provider specified: $LLM_PROVIDER. Defaulting to LM Studio."
-    $LLM_PROVIDER = "lmstudio"
-    $ACTIVE_LLM = $LLM_CONFIG[$LLM_PROVIDER]
-}
-
-# API configuration (for backward compatibility)
+# API configuration
 $LMSTUDIO_CONFIG = @{
-    BaseURL         = $ACTIVE_LLM.BaseURL
-    Model           = $ACTIVE_LLM.Model
-    SystemMessage   = $ACTIVE_LLM.SystemMessage
-    Temperature     = $ACTIVE_LLM.Temperature
-    MaxTokens       = $ACTIVE_LLM.MaxTokens
+    BaseURL         = "http://localhost:1234/v1/chat/completions"  # Default LM Studio port - CHANGE THIS TO YOUR PORT
+    Model           = "local-model"
+    SystemMessage   = "You are a scientific reasoning expert. Analyze from multiple perspectives: physical mechanisms, mathematical models, experimental validation, and practical applications. Maintain rigorous academic standards. Please be extremely strict to mermaid format."
+    Temperature     = 0.7
+    MaxTokens       = 16384    
     JsonDepth       = 10
     LineWrap        = 80
     FileCheckRetries= 3
@@ -163,385 +58,24 @@ $LMSTUDIO_CONFIG = @{
 $SEARCH_CONFIG = @{
     BaseURL         = "https://html.duckduckgo.com/html"
     UserAgent       = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-    ResultCount     = [int]($env:SEARCH_MAX_RESULTS ?? 10)
-    MaxPageSearch   = [int]($env:SEARCH_MAX_PAGES ?? 5)
+    ResultCount     = 10        # Maximum search results to return
+    MaxPageSearch   = 10        # Maximum pages to search and analyze
     Timeout         = 30
-    SearchTimeout   = [int]($env:SEARCH_TIMEOUT ?? 120)
     RetryCount      = 3
     RetryDelay      = 2
-    EnableSearch    = [System.Convert]::ToBoolean($env:SEARCH_ENABLED ?? "true")
-    ShowProgress    = [System.Convert]::ToBoolean($env:SEARCH_SHOW_PROGRESS ?? "true")
-}
-
-# Environment configuration
-if ($ACTIVE_LLM.ApiKey) {
-    $env:LMSTUDIO_API_KEY = $ACTIVE_LLM.ApiKey
-} else {
-    $env:LMSTUDIO_API_KEY = 'EMPTY'
+    EnableSearch    = $true    # Set to $false to disable search functionality
+    ShowProgress    = $true    # Show synchronous progress during search
 }
 
 # After (Local HTTP - remove TLS requirements)
-# Enhanced TLS configuration for web requests
-[System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12 -bor 
-                                                    [System.Net.SecurityProtocolType]::Tls11 -bor 
-                                                    [System.Net.SecurityProtocolType]::Tls -bor 
-                                                    [System.Net.SecurityProtocolType]::SystemDefault
-
+# Remove TLS configuration entirely for local HTTP
+[System.Net.ServicePointManager]::SecurityProtocol = @(
+    [System.Net.SecurityProtocolType]::SystemDefault
+)
+# Environment configuration
+$env:LMSTUDIO_API_KEY = 'EMPTY'
 # Bypass SSL certificate validation (use with caution)
 [System.Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
-
-function Invoke-LLMRequest {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory)]
-        [ValidateNotNullOrEmpty()]
-        [string]$UserPrompt,
-        [Parameter(Mandatory)]
-        [string]$BaseName
-    )
-
-    $retryCount = 0
-    $provider = $LLM_PROVIDER.ToLower()
-    $config = $ACTIVE_LLM
-    
-    # Set up headers based on provider
-    $headers = @{
-        "Content-Type" = "application/json"
-    }
-    
-    # Add authorization header based on provider
-    switch ($provider) {
-        "lmstudio" {
-            $headers["Authorization"] = "Bearer $($env:LMSTUDIO_API_KEY)"
-        }
-        "deepseek" {
-            $headers["Authorization"] = "Bearer $($env:DEEPSEEK_API_KEY)"
-        }
-        "openai" {
-            $headers["Authorization"] = "Bearer $($env:OPENAI_API_KEY)"
-        }
-        "anthropic" {
-            $headers["x-api-key"] = "$($env:ANTHROPIC_API_KEY)"
-            $headers["anthropic-version"] = "2023-06-01"
-        }
-        "google" {
-            # Google uses API key in URL
-        }
-        "mistral" {
-            $headers["Authorization"] = "Bearer $($env:MISTRAL_API_KEY)"
-        }
-        "azure_openai" {
-            $headers["api-key"] = "$($env:AZURE_OPENAI_API_KEY)"
-        }
-        "ollama" {
-            # Ollama doesn't require authentication
-        }
-    }
-
-    do {
-        try {
-            if ($BaseName -match '{|}' -or $BaseName -eq '') {
-                throw "Invalid BaseName contains format specifiers or is empty"
-            }
-
-            # Structured prompt remains the same
-            $structuredPrompt = @" 
-**Documentation Structure Requirements** 
-1. First line MUST be: ## {0} Analysis 
-2. Use Markdown formatting without code wrappers
-
-**Example Structure**
-## {0} Analysis
-### Fundamental Principles
-
-\$\$
-   I(z) = I_0 e^{{-\alpha z}}
-\$\$
-   Where :  
-- \$I(z)\$ = intensity at depth \$z\$
-- \$I_0\$ = incident intensity
-- \$\alpha\$ = absorption coefficient
-(The relevant parameters should also be in markdown format \$\$ rather than enclosed in parentheses such as \(\). The “\” in “\$” is an escape symbol and should be omitted in the actual output.)
-
-### Performance Metrics
-
-| Metric | Typical Value | Unit |
-|--------|---------------|------|
-| Thermal Diffusivity | 0.8 | mm²/s |
-
-(Please pay strict attention to the mermaid format,must beginning with "``````mermaid" and ending with "``````" after the last "];".)
-``````mermaid
-graph TD;
-    A[Cumulative Probability Distribution] --> B[Probability Density Function];
-    A --> C[Risk Management];
-    A --> D[Engineering Reliability];
-    A --> E[Quality Control];
-    B --> F[Parameter Estimation];
-    F --> G[Maximum Likelihood Estimation];
-``````
-
-**References**
-
-- Smith et al. (2020). Journal of Thermal Analysis. DOI:10.xxxx
-"@ -f $BaseName
-            
-            # Create request body based on provider
-            $body = $null
-            $uri = $config.BaseURL
-            
-            switch ($provider) {
-                "lmstudio" {
-                    $body = @{
-                        model       = $config.Model
-                        messages    = @(
-                            @{ role = "system"; content = $config.SystemMessage }
-                            @{ role = "user"; content = $structuredPrompt + "`n" + $UserPrompt }
-                        )
-                        temperature = $config.Temperature
-                        max_tokens  = $config.MaxTokens
-                    }
-                }
-                "deepseek" {
-                    $body = @{
-                        model       = $config.Model
-                        messages    = @(
-                            @{ role = "system"; content = $config.SystemMessage }
-                            @{ role = "user"; content = $structuredPrompt + "`n" + $UserPrompt }
-                        )
-                        temperature = $config.Temperature
-                        max_tokens  = $config.MaxTokens
-                    }
-                }
-                "openai" {
-                    $body = @{
-                        model       = $config.Model
-                        messages    = @(
-                            @{ role = "system"; content = $config.SystemMessage }
-                            @{ role = "user"; content = $structuredPrompt + "`n" + $UserPrompt }
-                        )
-                        temperature = $config.Temperature
-                        max_tokens  = $config.MaxTokens
-                    }
-                }
-                "anthropic" {
-                    $body = @{
-                        model       = $config.Model
-                        system      = $config.SystemMessage
-                        messages    = @(
-                            @{ role = "user"; content = $structuredPrompt + "`n" + $UserPrompt }
-                        )
-                        temperature = $config.Temperature
-                        max_tokens  = $config.MaxTokens
-                    }
-                }
-                "google" {
-                    $uri = "$($config.BaseURL)/$($config.Model):generateContent?key=$($config.ApiKey)"
-                    $body = @{
-                        contents    = @(
-                            @{
-                                role = "user"
-                                parts = @(
-                                    @{ text = $structuredPrompt + "`n" + $UserPrompt }
-                                )
-                            }
-                        )
-                        systemInstruction = @{
-                            text = $config.SystemMessage
-                        }
-                        generationConfig = @{
-                            temperature = $config.Temperature
-                            maxOutputTokens = $config.MaxTokens
-                        }
-                    }
-                }
-                "mistral" {
-                    $body = @{
-                        model       = $config.Model
-                        messages    = @(
-                            @{ role = "system"; content = $config.SystemMessage }
-                            @{ role = "user"; content = $structuredPrompt + "`n" + $UserPrompt }
-                        )
-                        temperature = $config.Temperature
-                        max_tokens  = $config.MaxTokens
-                    }
-                }
-                "azure_openai" {
-                    $uri = "$($config.BaseURL)/openai/deployments/$($config.Model)/chat/completions?api-version=$($config.ApiVersion)"
-                    $body = @{
-                        messages    = @(
-                            @{ role = "system"; content = $config.SystemMessage }
-                            @{ role = "user"; content = $structuredPrompt + "`n" + $UserPrompt }
-                        )
-                        temperature = $config.Temperature
-                        max_tokens  = $config.MaxTokens
-                    }
-                }
-                "ollama" {
-                    $body = @{
-                        model       = $config.Model
-                        messages    = @(
-                            @{ role = "system"; content = $config.SystemMessage }
-                            @{ role = "user"; content = $structuredPrompt + "`n" + $UserPrompt }
-                        )
-                        options     = @{
-                            temperature = $config.Temperature
-                            num_predict = $config.MaxTokens
-                        }
-                        stream      = $false
-                    }
-                }
-            }
-
-            if ($DEBUG_CONFIG.LogRequests) {
-                Write-Host "[DEBUG] Request Headers:`n$($headers | ConvertTo-Json)"
-                $jsonBody = $body | ConvertTo-Json -Depth 10
-                Write-Host "[DEBUG] Request Body:`n$jsonBody"
-            }
-
-            # Increased timeout to 30 minutes (1800 seconds)
-            $response = Invoke-RestMethod -Uri $uri `
-                -Method Post `
-                -Headers $headers `
-                -Body ($body | ConvertTo-Json -Depth 10) `
-                -TimeoutSec 1800 `
-                -ErrorAction Stop
-
-            # Extract content based on provider
-            $content = $null
-            
-            switch ($provider) {
-                "lmstudio" {
-                    if (-not $response.choices) {
-                        $responseJson = $response | ConvertTo-Json -Depth 10
-                        throw "Invalid API response structure. Full response:`n$responseJson"
-                    }
-                    $content = $response.choices[0].message.content
-                }
-                "deepseek" {
-                    if (-not $response.choices) {
-                        $responseJson = $response | ConvertTo-Json -Depth 10
-                        throw "Invalid API response structure. Full response:`n$responseJson"
-                    }
-                    $content = $response.choices[0].message.content
-                }
-                "openai" {
-                    if (-not $response.choices) {
-                        $responseJson = $response | ConvertTo-Json -Depth 10
-                        throw "Invalid API response structure. Full response:`n$responseJson"
-                    }
-                    $content = $response.choices[0].message.content
-                }
-                "anthropic" {
-                    if (-not $response.content) {
-                        $responseJson = $response | ConvertTo-Json -Depth 10
-                        throw "Invalid API response structure. Full response:`n$responseJson"
-                    }
-                    $content = $response.content[0].text
-                }
-                "google" {
-                    if (-not $response.candidates) {
-                        $responseJson = $response | ConvertTo-Json -Depth 10
-                        throw "Invalid API response structure. Full response:`n$responseJson"
-                    }
-                    $content = $response.candidates[0].content.parts[0].text
-                }
-                "mistral" {
-                    if (-not $response.choices) {
-                        $responseJson = $response | ConvertTo-Json -Depth 10
-                        throw "Invalid API response structure. Full response:`n$responseJson"
-                    }
-                    $content = $response.choices[0].message.content
-                }
-                "azure_openai" {
-                    if (-not $response.choices) {
-                        $responseJson = $response | ConvertTo-Json -Depth 10
-                        throw "Invalid API response structure. Full response:`n$responseJson"
-                    }
-                    $content = $response.choices[0].message.content
-                }
-                "ollama" {
-                    if (-not $response.message) {
-                        $responseJson = $response | ConvertTo-Json -Depth 10
-                        throw "Invalid API response structure. Full response:`n$responseJson"
-                    }
-                    $content = $response.message.content
-                }
-            }
-
-            if ([string]::IsNullOrEmpty($content)) {
-                throw "Empty content in API response"
-            }
-
-            return $content
-        }
-        catch {
-            # Error handling remains the same as in the original function
-            $errorMsg = $_.Exception.Message
-            $webException = $_.Exception -as [System.Net.WebException]
-
-            # Handle timeout special case
-            if ($webException -and $webException.Status -eq [System.Net.WebExceptionStatus]::Timeout) {
-                if ($DEBUG_CONFIG.ShowFullErrors) {
-                    Write-Host "[TIMEOUT] Request timed out after 30 minutes. Retrying in 60 seconds..."
-                }
-                
-                # Log timeout details
-                $timeoutLog = @{
-                    Timestamp     = Get-Date -Format 'o'
-                    FileName      = $BaseName
-                    ErrorType     = 'Timeout'
-                    RetryCount    = $retryCount
-                    NextRetry     = (Get-Date).AddSeconds(60).ToString('o')
-                    SystemStatus  = @{
-                        Memory = (Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory
-                        CPU    = (Get-Counter '\Processor(_Total)\% Processor Time').CounterSamples.CookedValue
-                    }
-                }
-                $timeoutLog | ConvertTo-Json | Out-File "Timeout_$BaseName.log" -Append
-
-                # Wait exactly 1 minute (60 seconds)
-                Start-Sleep -Seconds 60
-                continue  # Bypass normal retry counter
-            }
-            # Handle other errors
-            else {
-                $retryCount++
-                if ($retryCount -ge $LMSTUDIO_CONFIG.MaxRetries) {
-                    $errorDetails = @{
-                        FinalAttempt = $true
-                        Error        = $errorMsg
-                        Retries      = $retryCount
-                        Timestamp    = Get-Date -Format 'o'
-                    }
-                    $errorDetails | ConvertTo-Json | Out-File "Error_$BaseName.json" -Append
-                    throw "API Request Failed after $retryCount attempts: $errorMsg"
-                }
-
-                if ($DEBUG_CONFIG.ShowFullErrors) {
-                    Write-Host "[RETRYING] Attempt $retryCount failed: $errorMsg"
-                }
-
-                # Calculate exponential backoff with jitter
-                $baseDelay = [Math]::Pow(2, $retryCount) * $LMSTUDIO_CONFIG.RetryDelay
-                $jitter = Get-Random -Minimum -0.5 -Maximum 0.5
-                $delay = [Math]::Round($baseDelay * (1 + $jitter))
-                
-                # Log retry details
-                $retryLog = @{
-                    Timestamp     = Get-Date -Format 'o'
-                    FileName      = $BaseName
-                    Error         = $errorMsg
-                    RetryCount    = $retryCount
-                    NextRetry     = (Get-Date).AddSeconds($delay).ToString('o')
-                    DelaySeconds  = $delay
-                }
-                $retryLog | ConvertTo-Json | Out-File "Retry_$BaseName.log" -Append
-
-                Start-Sleep -Seconds $delay
-            }
-        }
-    } while ($true)
-}
 
 # Add cookie handling function
 function Initialize-CookieContainer {
@@ -727,12 +261,13 @@ function Get-StringSimilarity {
     }
 }
 
+
 function Move-ProcessedFile {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [System.IO.FileInfo]$File,
-        [string]$DestinationPath = "E:\Knowledge\Study\dp_know"
+        [string]$DestinationPath = $script:DestinationPath
     )
 
     try {
@@ -766,182 +301,43 @@ function Move-ProcessedFile {
     }
 }
 
-function Test-LLMConnection {
+function Test-LMStudioConnection {
     [CmdletBinding()]
     param()
     try {
-        $provider = $LLM_PROVIDER.ToLower()
-        $config = $ACTIVE_LLM
-        
-        # Set up headers based on provider
-        $headers = @{
-            "Content-Type" = "application/json"
+        # Verify local port first
+        $portTest = Test-NetConnection -ComputerName localhost -Port 301 -ErrorAction Stop
+        if (-not $portTest.TcpTestSucceeded) {
+            throw "LM Studio API port 301 not accessible"
         }
-        
-        # Add authorization header based on provider
-        switch ($provider) {
-            "lmstudio" {
-                # Verify local port first for LM Studio
-                $portTest = Test-NetConnection -ComputerName localhost -Port 301 -ErrorAction Stop
-                if (-not $portTest.TcpTestSucceeded) {
-                    throw "LM Studio API port 301 not accessible"
-                }
-                $headers["Authorization"] = "Bearer $($env:LMSTUDIO_API_KEY)"
-            }
-            "deepseek" {
-                $headers["Authorization"] = "Bearer $($env:DEEPSEEK_API_KEY)"
-            }
-            "openai" {
-                $headers["Authorization"] = "Bearer $($env:OPENAI_API_KEY)"
-            }
-            "anthropic" {
-                $headers["x-api-key"] = "$($env:ANTHROPIC_API_KEY)"
-                $headers["anthropic-version"] = "2023-06-01"
-            }
-            "google" {
-                # Google uses API key in URL
-            }
-            "mistral" {
-                $headers["Authorization"] = "Bearer $($env:MISTRAL_API_KEY)"
-            }
-            "azure_openai" {
-                $headers["api-key"] = "$($env:AZURE_OPENAI_API_KEY)"
-            }
-            "ollama" {
-                # Ollama doesn't require authentication
-                # Check if Ollama is running on the default port
-                $portTest = Test-NetConnection -ComputerName localhost -Port 11434 -ErrorAction Stop
-                if (-not $portTest.TcpTestSucceeded) {
-                    throw "Ollama API port 11434 not accessible"
-                }
-            }
+        $testBody = @{
+            model = $LMSTUDIO_CONFIG.Model
+            messages = @(@{ role = "user"; content = "Connection test" })
+            max_tokens = 1
+            stream = $false
         }
-
-        # Create request body based on provider
-        $body = $null
-        $uri = $config.BaseURL
-        
-        switch ($provider) {
-            "lmstudio" {
-                $body = @{
-                    model       = $config.Model
-                    messages    = @(
-                        @{ role = "user"; content = "Connection test" }
-                    )
-                    max_tokens  = 1
-                    stream      = $false
-                }
-            }
-            "deepseek" {
-                $body = @{
-                    model       = $config.Model
-                    messages    = @(
-                        @{ role = "user"; content = "Connection test" }
-                    )
-                    max_tokens  = 1
-                }
-            }
-            "openai" {
-                $body = @{
-                    model       = $config.Model
-                    messages    = @(
-                        @{ role = "user"; content = "Connection test" }
-                    )
-                    max_tokens  = 1
-                }
-            }
-            "anthropic" {
-                $body = @{
-                    model       = $config.Model
-                    messages    = @(
-                        @{ role = "user"; content = "Connection test" }
-                    )
-                    max_tokens  = 1
-                }
-            }
-            "google" {
-                $uri = "$($config.BaseURL)/$($config.Model):generateContent?key=$($config.ApiKey)"
-                $body = @{
-                    contents    = @(
-                        @{
-                            role = "user"
-                            parts = @(
-                                @{ text = "Connection test" }
-                            )
-                        }
-                    )
-                    generationConfig = @{
-                        maxOutputTokens = 1
-                    }
-                }
-            }
-            "mistral" {
-                $body = @{
-                    model       = $config.Model
-                    messages    = @(
-                        @{ role = "user"; content = "Connection test" }
-                    )
-                    max_tokens  = 1
-                }
-            }
-            "azure_openai" {
-                $uri = "$($config.BaseURL)/openai/deployments/$($config.Model)/chat/completions?api-version=$($config.ApiVersion)"
-                $body = @{
-                    messages    = @(
-                        @{ role = "user"; content = "Connection test" }
-                    )
-                    max_tokens  = 1
-                }
-            }
-            "ollama" {
-                $body = @{
-                    model       = $config.Model
-                    messages    = @(
-                        @{ role = "user"; content = "Connection test" }
-                    )
-                    options     = @{
-                        num_predict = 1
-                    }
-                    stream      = $false
-                }
-            }
-        }
-
-        # Make the API request
-        $response = Invoke-RestMethod -Uri $uri `
+        $response = Invoke-RestMethod -Uri $LMSTUDIO_CONFIG.BaseURL `
             -Method Post `
-            -Headers $headers `
-            -Body ($body | ConvertTo-Json -Depth 10) `
+            -Headers @{ 
+                Authorization = "Bearer $env:LMSTUDIO_API_KEY"
+                "Content-Type" = "application/json"
+            } `
+            -Body ($testBody | ConvertTo-Json) `
             -TimeoutSec 5 `
             -ErrorAction Stop
-        
         return $true
     }
     catch {
         Write-Host "[Network Diagnostic]"
         Write-Host "Error: $($_.Exception.Message)"
         
-        # Check for provider-specific processes
         Write-Host "Local Service Checks:"
-        switch ($provider) {
-            "lmstudio" {
-                try {
-                    $processCheck = Get-Process lmstudio -ErrorAction Stop
-                    Write-Host "LM Studio Process: $($processCheck.Id) - $($processCheck.StartTime)"
-                }
-                catch {
-                    Write-Host "LM Studio Process: Not Running"
-                }
-            }
-            "ollama" {
-                try {
-                    $processCheck = Get-Process ollama -ErrorAction Stop
-                    Write-Host "Ollama Process: $($processCheck.Id) - $($processCheck.StartTime)"
-                }
-                catch {
-                    Write-Host "Ollama Process: Not Running"
-                }
-            }
+        try {
+            $processCheck = Get-Process lmstudio -ErrorAction Stop
+            Write-Host "LM Studio Process: $($processCheck.Id) - $($processCheck.StartTime)"
+        }
+        catch {
+            Write-Host "LM Studio Process: Not Running"
         }
         return $false
     }
@@ -1062,6 +458,172 @@ function Invoke-ProcessWithTimeout {
 }
 
 
+function Invoke-LMStudioRequest {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [ValidateNotNullOrEmpty()]
+        [string]$UserPrompt,
+        [Parameter(Mandatory)]
+        [string]$BaseName
+    )
+
+    $retryCount = 0
+    $headers = @{
+        "Content-Type"  = "application/json"
+        "Authorization" = "Bearer $($env:LMSTUDIO_API_KEY)"
+    }
+
+    do {
+        try {
+            if ($BaseName -match '{|}' -or $BaseName -eq '') {
+                throw "Invalid BaseName contains format specifiers or is empty"
+            }
+
+            $structuredPrompt = @" 
+**Documentation Structure Requirements** 
+1. First line MUST be: ## {0} Analysis 
+2. Use Markdown formatting without code wrappers
+
+**Example Structure**
+## {0} Analysis
+### Fundamental Principles
+
+\$\$
+   I(z) = I_0 e^{{-\alpha z}}
+\$\$
+   Where :  
+- \$I(z)\$ = intensity at depth \$z\$
+- \$I_0\$ = incident intensity
+- \$\alpha\$ = absorption coefficient
+(The relevant parameters should also be in markdown format \$\$ rather than enclosed in parentheses such as \(\). The “\” in “\$” is an escape symbol and should be omitted in the actual output.)
+
+### Performance Metrics
+
+| Metric | Typical Value | Unit |
+|--------|---------------|------|
+| Thermal Diffusivity | 0.8 | mm²/s |
+
+(Please pay strict attention to the mermaid format,must beginning with "``````mermaid" and ending with "``````" after the last "];".)
+``````mermaid
+graph TD;
+    A[Cumulative Probability Distribution] --> B[Probability Density Function];
+    A --> C[Risk Management];
+    A --> D[Engineering Reliability];
+    A --> E[Quality Control];
+    B --> F[Parameter Estimation];
+    F --> G[Maximum Likelihood Estimation];
+``````
+
+**References**
+
+- Smith et al. (2020). Journal of Thermal Analysis. DOI:10.xxxx
+"@ -f $BaseName
+
+            $body = @{
+                model       = $LMSTUDIO_CONFIG.Model
+                messages    = @(
+                    @{ role = "system"; content = $LMSTUDIO_CONFIG.SystemMessage }
+                    @{ role = "user"; content = $structuredPrompt + "`n" + $UserPrompt }
+                )
+                temperature = $LMSTUDIO_CONFIG.Temperature
+                max_tokens  = $LMSTUDIO_CONFIG.MaxTokens
+            }
+
+            if ($DEBUG_CONFIG.LogRequests) {
+                Write-Host "[DEBUG] Request Headers:`n$($headers | ConvertTo-Json)"
+                $jsonBody = $body | ConvertTo-Json -Depth 10
+                Write-Host "[DEBUG] Request Body:`n$jsonBody"
+            }
+
+            # Increased timeout to 30 minutes (1800 seconds)
+            $response = Invoke-RestMethod -Uri $LMSTUDIO_CONFIG.BaseURL `
+                -Method Post `
+                -Headers $headers `
+                -Body ($body | ConvertTo-Json -Depth 10) `
+                -TimeoutSec 1800 `
+                -ErrorAction Stop
+
+            if (-not $response.choices) {
+                $responseJson = $response | ConvertTo-Json -Depth 10
+                throw "Invalid API response structure. Full response:`n$responseJson"
+            }
+
+            if (-not $response.choices[0].message.content) {
+                throw "Empty content in API response"
+            }
+
+            return $response.choices[0].message.content
+        }
+        catch {
+            $errorMsg = $_.Exception.Message
+            $webException = $_.Exception -as [System.Net.WebException]
+
+            # Handle timeout special case
+            if ($webException -and $webException.Status -eq [System.Net.WebExceptionStatus]::Timeout) {
+                if ($DEBUG_CONFIG.ShowFullErrors) {
+                    Write-Host "[TIMEOUT] Request timed out after 30 minutes. Retrying in 60 seconds..."
+                }
+                
+                # Log timeout details
+                $timeoutLog = @{
+                    Timestamp     = Get-Date -Format 'o'
+                    FileName      = $BaseName
+                    ErrorType     = 'Timeout'
+                    RetryCount    = $retryCount
+                    NextRetry     = (Get-Date).AddSeconds(60).ToString('o')
+                    SystemStatus  = @{
+                        Memory = (Get-CimInstance Win32_OperatingSystem).FreePhysicalMemory
+                        CPU    = (Get-Counter '\Processor(_Total)\% Processor Time').CounterSamples.CookedValue
+                    }
+                }
+                $timeoutLog | ConvertTo-Json | Out-File "Timeout_$BaseName.log" -Append
+
+                # Wait exactly 1 minute (60 seconds)
+                Start-Sleep -Seconds 60
+                continue  # Bypass normal retry counter
+            }
+            # Handle other errors
+            else {
+                $retryCount++
+                if ($retryCount -ge $LMSTUDIO_CONFIG.MaxRetries) {
+                    $errorDetails = @{
+                        FinalAttempt = $true
+                        Error        = $errorMsg
+                        Retries      = $retryCount
+                        Timestamp    = Get-Date -Format 'o'
+                    }
+                    $errorDetails | ConvertTo-Json | Out-File "Error_$BaseName.json" -Append
+                    throw "API Request Failed after $retryCount attempts: $errorMsg"
+                }
+
+                if ($DEBUG_CONFIG.ShowFullErrors) {
+                    Write-Host "[RETRYING] Attempt $retryCount failed: $errorMsg"
+                }
+
+                # Calculate exponential backoff with jitter
+                $baseDelay = [Math]::Pow(2, $retryCount) * $LMSTUDIO_CONFIG.RetryDelay
+                $jitter = Get-Random -Minimum -0.5 -Maximum 0.5
+                $delay = [Math]::Round($baseDelay * (1 + $jitter))
+                
+                # Log retry details
+                $retryLog = @{
+                    Timestamp     = Get-Date -Format 'o'
+                    FileName      = $BaseName
+                    Error         = $errorMsg
+                    RetryCount    = $retryCount
+                    NextRetry     = (Get-Date).AddSeconds($delay).ToString('o')
+                    DelaySeconds  = $delay
+                }
+                $retryLog | ConvertTo-Json | Out-File "Retry_$BaseName.log" -Append
+
+                Start-Sleep -Seconds $delay
+            }
+        }
+    } while ($true)
+}
+
+
 function Write-MarkdownContent {
     [CmdletBinding()]
     param(
@@ -1089,8 +651,8 @@ function Write-MarkdownContent {
             "",
             $cleanedContent.Trim(),
             "",
-            "# Generated by $($LLM_PROVIDER) LLM",
-            "**Model**: $($ACTIVE_LLM.Model)",
+            "# Generated by LMStudio Reasoner",
+            "**Model**: $($LMSTUDIO_CONFIG.Model)",
             "**Timestamp**: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')",
             ""
         ) -join "`n"
@@ -1105,7 +667,6 @@ function Write-MarkdownContent {
         return $false
     }
 }
-
 
 
 # Add required assembly for URL encoding/decoding
@@ -1150,26 +711,12 @@ function Invoke-DuckDuckGoSearch {
             Write-Host "[DEBUG] Query: $enhancedQuery"
         }
         
-        Write-Host "[SEARCH] Starting DuckDuckGo search with $($SEARCH_CONFIG.SearchTimeout) second timeout..."
-        $searchStartTime = Get-Date
-        
-        # Instead of using Task.Run, use a direct approach with timeout
         $retryCount = 0
         $success = $false
         $results = $null
         
-        # Create a timer for the overall search operation
-        $searchTimer = [System.Diagnostics.Stopwatch]::StartNew()
-        
         while (-not $success -and $retryCount -lt $SEARCH_CONFIG.RetryCount) {
-            # Check if we've exceeded the search timeout
-            if ($searchTimer.Elapsed.TotalSeconds -gt $SEARCH_CONFIG.SearchTimeout) {
-                Write-Warning "[SEARCH] DuckDuckGo search timed out after $($SEARCH_CONFIG.SearchTimeout) seconds"
-                return "DuckDuckGo search timed out after $($SEARCH_CONFIG.SearchTimeout) seconds. Proceeding with partial or no results."
-            }
-            
             try {
-                # Use Invoke-WebRequest with its own timeout
                 $response = Invoke-WebRequest -Uri $searchUrl -Method Post -Headers $headers -Body $body -TimeoutSec $SEARCH_CONFIG.Timeout
                 $success = $true
                 
@@ -1188,9 +735,6 @@ function Invoke-DuckDuckGoSearch {
             }
         }
         
-        $searchTimer.Stop()
-        $searchDuration = (Get-Date) - $searchStartTime
-        Write-Host "[SEARCH] DuckDuckGo search completed in $($searchDuration.TotalSeconds.ToString('0.00')) seconds"
         return Format-SearchResultsForLLM -Results $results
     }
     catch {
@@ -1327,17 +871,10 @@ function Invoke-WebContentFetch {
         [Parameter(Mandatory)]
         [string]$Url,
         [int]$PageNumber = 0,
-        [int]$TotalPages = 1,
-        [System.Threading.CancellationToken]$CancellationToken = [System.Threading.CancellationToken]::None
+        [int]$TotalPages = 1
     )
     
     try {
-        # Check if cancellation was requested
-        if ($CancellationToken.IsCancellationRequested) {
-            Write-Host "[CANCELLED] Content fetch cancelled for: $Url"
-            return "Content fetch cancelled due to search timeout"
-        }    
-        
         $headers = @{
             "User-Agent" = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
             "Accept" = "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8"
@@ -1353,6 +890,7 @@ function Invoke-WebContentFetch {
         # Create a WebSession with our cookie container
         $webSession = New-Object Microsoft.PowerShell.Commands.WebRequestSession
         $webSession.Cookies = $Global:CookieContainer
+        
         if ($DEBUG_CONFIG.LogRequests) {
             Write-Host "[DEBUG] Fetching content from: $Url"
         }
@@ -1407,8 +945,8 @@ function Invoke-WebContentFetch {
                         $text = Clean-WebContent -Content $text -Url $Url
                         
                         # Truncate if too long
-                        if ($text.Length -gt 24000) {
-                            $text = $text.Substring(0, 24000) + "... [content truncated]"
+                        if ($text.Length -gt 16000) {
+                            $text = $text.Substring(0, 16000) + "... [content truncated]"
                         }
                         
                         Write-Host "[INFO] Successfully retrieved Wikipedia content using relaxed SSL validation"
@@ -1476,8 +1014,8 @@ function Invoke-WebContentFetch {
                 $text = Clean-WebContent -Content $text -Url $Url
                 
                 # Truncate if too long
-                if ($text.Length -gt 24000) {
-                    $text = $text.Substring(0, 24000) + "... [content truncated]"
+                if ($text.Length -gt 8000) {
+                    $text = $text.Substring(0, 8000) + "... [content truncated]"
                 }
                     
                     return $text
@@ -1512,8 +1050,8 @@ function Invoke-WebContentFetch {
                         $text = Clean-WebContent -Content $text -Url $Url
                         
                         # Truncate if too long
-                        if ($text.Length -gt 24000) {
-                            $text = $text.Substring(0, 24000) + "... [content truncated]"
+                        if ($text.Length -gt 16000) {
+                            $text = $text.Substring(0, 16000) + "... [content truncated]"
                         }
                         
                         Write-Host "[INFO] Successfully retrieved content from Internet Archive"
@@ -1550,8 +1088,8 @@ function Invoke-WebContentFetch {
                         $text = Clean-WebContent -Content $text -Url $Url
                         
                         # Truncate if too long
-                        if ($text.Length -gt 24000) {
-                            $text = $text.Substring(0, 24000) + "... [content truncated]"
+                        if ($text.Length -gt 16000) {
+                            $text = $text.Substring(0, 16000) + "... [content truncated]"
                         }
                         
                         Write-Host "[INFO] Successfully retrieved content from archive.today"
@@ -1588,8 +1126,8 @@ function Invoke-WebContentFetch {
                         $text = Clean-WebContent -Content $text -Url $Url
                         
                         # Truncate if too long
-                        if ($text.Length -gt 24000) {
-                            $text = $text.Substring(0, 24000) + "... [content truncated]"
+                        if ($text.Length -gt 16000) {
+                            $text = $text.Substring(0, 16000) + "... [content truncated]"
                         }
                         
                         Write-Host "[INFO] Successfully retrieved content from Google Cache"
@@ -1603,8 +1141,8 @@ function Invoke-WebContentFetch {
                         Write-Host "[INFO] Google Cache access failed: $($_.Exception.Message)"
                     }
                 }
-                
-                # If all archive services fail, try to extract metadata from the URL
+
+                                # If all archive services fail, try to extract metadata from the URL
                 if ($Url -match "researchgate\.net/publication/(\d+)_(.+)") {
                     $pubId = $Matches[1]
                     $title = $Matches[2] -replace '_', ' '
@@ -1757,8 +1295,8 @@ Keep the summary concise but scientifically accurate, focusing on the most relev
             
             
             # Process content in chunks to avoid exceeding API limits
-            # Increased chunk size to get between 8192-16384 tokens (approx. 32000-64000 chars)
-            $maxChunkSize = 48000  # Characters per chunk (approx. 12000 tokens)
+            # Increased chunk size to get between 4096-8192 tokens (approx. 16000-32000 chars)
+            $maxChunkSize = 24000  # Characters per chunk (approx. 6000 tokens)
             $chunks = @()
             $currentChunk = ""
             $chunkCounter = 1
@@ -1973,11 +1511,11 @@ function Invoke-LMStudioSummarization {
         # Calculate approximate token count (rough estimate: 4 chars = 1 token)
         $estimatedTokens = [Math]::Ceiling($Prompt.Length / 4)
         # Increased token limits for both intermediate and final summaries
-        $maxOutputTokens = if ($IsIntermediate) { 16384 } else { 16384 }
+        $maxOutputTokens = if ($IsIntermediate) { 4096 } else { 8192 }
         
         # Add validation to ensure token count is appropriate
-        if ($estimatedTokens -lt 10000 -and $IsIntermediate) {
-            Write-Host "[WARNING] Input tokens during summary can be greater than 10000 but need to be less than 20000. current Estimated input tokens: $estimatedTokens is too small."
+        if ($estimatedTokens -lt 4096 -and $IsIntermediate) {
+            Write-Host "[WARNING] Input tokens during summary can be greater than 4096 but need to be less than 8192. current Estimated input tokens: $estimatedTokens is too small."
         }
         
         Write-Host "[INFO] Estimated input tokens: $estimatedTokens, Max output tokens: $maxOutputTokens"
@@ -2196,14 +1734,8 @@ function Move-ProcessedFile {
     param(
         [Parameter(Mandatory)]
         [System.IO.FileInfo]$File,
-        [string]$DestinationPath = $env:OUTPUT_DESTINATION_PATH
+        [string]$DestinationPath = "E:\Knowledge\Study\dp_know"
     )
-
-    # If destination path is empty, don't move the file
-    if ([string]::IsNullOrWhiteSpace($DestinationPath)) {
-        Write-Host "[MOVE] No destination path specified. File will remain in current directory."
-        return $true
-    }
 
     try {
         # Ensure destination directory exists
@@ -2225,14 +1757,9 @@ function Move-ProcessedFile {
             Write-Host "[MOVE] File already exists at destination. Renaming to: $newFileName"
         }
 
-        # Move the file only if OUTPUT_MOVE_PROCESSED is true
-        if ([System.Convert]::ToBoolean($env:OUTPUT_MOVE_PROCESSED ?? "true")) {
-            Move-Item -Path $File.FullName -Destination $destinationFile -Force
-            Write-Host "[MOVE] Successfully moved $($File.Name) to $DestinationPath"
-        } else {
-            Copy-Item -Path $File.FullName -Destination $destinationFile -Force
-            Write-Host "[COPY] Successfully copied $($File.Name) to $DestinationPath"
-        }
+        # Move the file
+        Move-Item -Path $File.FullName -Destination $destinationFile -Force
+        Write-Host "[MOVE] Successfully moved $($File.Name) to $DestinationPath"
         return $true
     }
     catch {
@@ -2241,138 +1768,126 @@ function Move-ProcessedFile {
     }
 }
 
-# Main script execution
-try {
-    # Load configuration from .env file
-    Write-Host "Loading configuration from .env"
-    Import-DotEnv
-    
-    # Initialize cookie container for web requests
-    $Global:CookieContainer = New-Object System.Net.CookieContainer
-    Write-Host "[INFO] Cookie container initialized for handling consent popups"
-    
-    # Verify API connectivity
-    Write-Host "Running API connectivity tests..."
-    $apiConnected = Test-LLMConnection
-    
-    if (-not $apiConnected) {
-        Write-Error "API connection failed. Check:`n1. API key validity`n2. Network connectivity`n3. Base URL: $($ACTIVE_LLM.BaseURL)"
-        exit 1
+# Modify the main execution section to implement the new search logic
+if (-not $env:LMStudio_API_KEY) {
+    Write-Error "API key required! Set with: `$env:LMStudio_API_KEY = 'your-key'"
+    exit 1
+}
+
+if ($structuredPrompt -match '(?<!\\){([^0-9]|$)' -or $structuredPrompt -match '(?<!\\)}') {
+    $errorPosition = $Matches.Index
+    throw "Invalid format string at position $errorPosition. Unescaped curly brace detected."
+}
+
+Write-Host "Running API connectivity tests..."
+if (-not (Test-LMStudioConnection)) {
+    Write-Error "API connection failed. Check:"
+    Write-Host "1. API key validity"
+    Write-Host "2. Network connectivity"
+    Write-Host "3. Base URL: $($LMSTUDIO_CONFIG.BaseURL)"
+    exit 1
+}
+
+# Calculate delay in seconds
+$delaySeconds = [math]::Round($SCHEDULE_CONFIG.StartDelayHours * 3600)
+if ($delaySeconds -gt 0) {
+    Write-Host "Delaying start for $($SCHEDULE_CONFIG.StartDelayHours) hours..."
+    Start-CountdownTimer -Seconds $delaySeconds -Message "Scheduled Delay"
+}
+
+$isFirstCycle = $true
+$cycleCount = 0
+$maxCycles = 1000 # Safety limit
+
+while ($cycleCount -lt $maxCycles) {
+    $cycleCount++
+    $files = Get-ValidMarkdownFiles
+    if (-not $files) {
+        Write-Host "All files processed successfully."
+        break
     }
-    
-    # Calculate delay in seconds
-    $delaySeconds = [math]::Round($SCHEDULE_CONFIG.StartDelayHours * 3600)
-    if ($delaySeconds -gt 0) {
-        Write-Host "Delaying start for $($SCHEDULE_CONFIG.StartDelayHours) hours..."
-        Start-CountdownTimer -Seconds $delaySeconds -Message "Scheduled Delay"
-    }
-    
-    $isFirstCycle = $true
-    $cycleCount = 0
-    $maxCycles = 1000 # Safety limit
-    
-    while ($cycleCount -lt $maxCycles) {
-        $cycleCount++
-        $files = Get-ValidMarkdownFiles
-        if (-not $files) {
-            Write-Host "All files processed successfully."
-            break
-        }
-        
-        $currentTimeout = if ($isFirstCycle) { $SCHEDULE_CONFIG.TimeoutHours } else { 8 }
-        $isFirstCycle = $false
-        
-        $cycleStart = Get-Date
-        $timeoutDeadline = $cycleStart.AddHours($currentTimeout)
-        Write-Host @"
+
+    $currentTimeout = if ($isFirstCycle) { $SCHEDULE_CONFIG.TimeoutHours } else { 8 }
+    $isFirstCycle = $false
+
+    $cycleStart = Get-Date
+    $timeoutDeadline = $cycleStart.AddHours($currentTimeout)
+    Write-Host @"
 `n[PROCESSING CYCLE $cycleCount]
 Start Time:    $($cycleStart.ToString('yyyy-MM-dd HH:mm:ss'))
 Timeout After: $currentTimeout hours
 Deadline:      $($timeoutDeadline.ToString('yyyy-MM-dd HH:mm:ss'))
 Remaining Files: $($files.Count)
 "@
-        
-        foreach ($file in $files) {
-            $currentTime = Get-Date
-            if ($currentTime -ge $timeoutDeadline) {
-                Write-Host "[TIMEOUT] Cycle timeout reached at $($currentTime.ToString('HH:mm:ss'))"
-                Write-Host "Suspending operations for 24 hours..."
-                Start-CountdownTimer -Seconds (24*3600) -Message "Suspension Period"
-                break
-            }
+
+    foreach ($file in $files) {
+        $currentTime = Get-Date
+        if ($currentTime -ge $timeoutDeadline) {
+            Write-Host "[TIMEOUT] Cycle timeout reached at $($currentTime.ToString('HH:mm:ss'))"
+            Write-Host "Suspending operations for 24 hours..."
+            Start-CountdownTimer -Seconds (0.00001*3600) -Message "Suspension Period"
+            break
+        }
+
+        $timeRemaining = $timeoutDeadline - $currentTime
+        Write-Host "`n[FILE PROCESSING] $($file.Name)"
+        Write-Host "Remaining Window: $($timeRemaining.ToString('hh\:mm\:ss'))"
+
+        try {
+            $baseName = [System.IO.Path]::GetFileNameWithoutExtension($file.Name)
+            $safeBaseName = $baseName -replace '[{}£$%^]', ''
             
-            $timeRemaining = $timeoutDeadline - $currentTime
-            Write-Host "`n[FILE PROCESSING] $($file.Name)"
-            Write-Host "Remaining Window: $($timeRemaining.ToString('hh\:mm\:ss'))"
+            # Step 1: Search based on $safeBaseName using DuckDuckGo
+            $searchResults = ""
+            $contentDetails = @()
+            $searchSummary = ""
             
-            try {
-                $baseName = [System.IO.Path]::GetFileNameWithoutExtension($file.Name)
-                $safeBaseName = $baseName -replace '[{}£$%^]', ''
+            if ($SEARCH_CONFIG.EnableSearch) {
+                Write-Host "[SEARCH] Performing DuckDuckGo search for: $safeBaseName"
+                $searchQuery = "$safeBaseName technical documentation research papers"
+                $searchResults = Invoke-DuckDuckGoSearch -Query $searchQuery
                 
-                # Step 1: Search based on $safeBaseName using DuckDuckGo
-                $searchResults = ""
-                $contentDetails = @()
-                $searchSummary = ""
+                if ($DEBUG_CONFIG.SaveJsonDumps) {
+                    $searchResults | Out-File "Search_$safeBaseName.txt"
+                }
                 
-                if ($SEARCH_CONFIG.EnableSearch) {
-                    Write-Host "[SEARCH] Performing DuckDuckGo search for: $safeBaseName"
-                    $searchQuery = "$safeBaseName technical documentation research papers"
-                    $searchResults = Invoke-DuckDuckGoSearch -Query $searchQuery
+                # Extract top URLs and fetch content with progress display
+                if ($searchResults -match "URL: (https?://[^\s]+)") {
+                    $topUrls = [regex]::Matches($searchResults, "URL: (https?://[^\s]+)") | 
+                        Select-Object -First $SEARCH_CONFIG.MaxPageSearch | 
+                        ForEach-Object { $_.Groups[1].Value }
                     
-                    if ($DEBUG_CONFIG.SaveJsonDumps) {
-                        $searchResults | Out-File "Search_$safeBaseName.txt"
-                    }
+                    $totalUrls = $topUrls.Count
+                    Write-Host "[FETCH] Retrieving content from $totalUrls pages..."
                     
-                    # Create a cancellation token source for content fetching
-                    $cts = New-Object System.Threading.CancellationTokenSource
-                    $cts.CancelAfter([TimeSpan]::FromSeconds($SEARCH_CONFIG.SearchTimeout))
-                    
-                    # Extract top URLs and fetch content with progress display
-                    if ($searchResults -match "URL: (https?://[^\s]+)") {
-                        $topUrls = [regex]::Matches($searchResults, "URL: (https?://[^\s]+)") | 
-                            Select-Object -First $SEARCH_CONFIG.MaxPageSearch | 
-                            ForEach-Object { $_.Groups[1].Value }
+                    for ($i = 0; $i -lt $topUrls.Count; $i++) {
+                        $url = $topUrls[$i]
+                        Write-Host "[FETCH] Page $($i+1)/$($totalUrls): $url"
+                        $content = Invoke-WebContentFetch -Url $url -PageNumber $i -TotalPages $totalUrls
                         
-                        $totalUrls = $topUrls.Count
-                        Write-Host "[FETCH] Retrieving content from $totalUrls pages..."
-                        
-                        for ($i = 0; $i -lt $topUrls.Count; $i++) {
-                            # Check if cancellation was requested
-                            if ($cts.Token.IsCancellationRequested) {
-                                Write-Warning "[TIMEOUT] Search operation timed out after $($SEARCH_CONFIG.SearchTimeout) seconds"
-                                break
-                            }
+                        if ($content -and $content -notmatch "^Error:") {
+                            $contentDetails += "Content from ${url}:`n$content"
                             
-                            $url = $topUrls[$i]
-                            Write-Host "[FETCH] Page $($i+1)/$($totalUrls): $url"
-                            $content = Invoke-WebContentFetch -Url $url -PageNumber $i -TotalPages $totalUrls -CancellationToken $cts.Token
-                            
-                            if ($content -and $content -notmatch "^Error:" -and $content -notmatch "^Content fetch cancelled") {
-                                $contentDetails += "Content from ${url}:`n$content"
-                                
-                                if ($DEBUG_CONFIG.SaveJsonDumps) {
-                                    $content | Out-File "Content_$(([uri]$url).Host)_$safeBaseName.txt"
-                                }
+                            if ($DEBUG_CONFIG.SaveJsonDumps) {
+                                $content | Out-File "Content_$(([uri]$url).Host)_$safeBaseName.txt"
                             }
-                        }
-                    }
-                    
-                    # Dispose of the cancellation token source
-                    $cts.Dispose()
-                    
-                    # Step 2: Generate a summary of the search results
-                    if ($searchResults -and ($contentDetails.Count -gt 0 -or $searchResults -match "timed out")) {
-                        $searchSummary = Get-SearchSummary -BaseName $safeBaseName -SearchResults $searchResults -ContentDetails $contentDetails
-                        
-                        if ($DEBUG_CONFIG.SaveJsonDumps) {
-                            $searchSummary | Out-File "Summary_$safeBaseName.txt"
                         }
                     }
                 }
                 
-                # Step 3: Create the final prompt with the search summary
-                $prompt = if ($searchSummary) {
-                    @"
+                # Step 2: Generate a summary of the search results using LM Studio
+                if ($searchResults -and $contentDetails.Count -gt 0) {
+                    $searchSummary = Get-SearchSummary -BaseName $safeBaseName -SearchResults $searchResults -ContentDetails $contentDetails
+                    
+                    if ($DEBUG_CONFIG.SaveJsonDumps) {
+                        $searchSummary | Out-File "Summary_$safeBaseName.txt"
+                    }
+                }
+            }
+            
+            # Step 3: Create the final prompt with the search summary
+            $prompt = if ($searchSummary) {
+                @"
 Create comprehensive technical documentation about $safeBaseName based on the following research summary:
 
 $searchSummary
@@ -2400,9 +1915,9 @@ Follow these requirements:
 
 Format directly for Obsidian without markdown code blocks.
 "@
-                } else {
-                    # Original prompt without search results but with scientific focus
-                    @"
+            } else {
+                # Original prompt without search results but with scientific focus
+                @"
 Create comprehensive technical documentation about $safeBaseName with a focus on scientific and mathematical rigor. Include:
 1. Detailed explanation of core concepts with their mathematical foundations
 2. Key technical specifications with precise values and units
@@ -2426,96 +1941,89 @@ Follow these requirements:
 
 Format directly for Obsidian without markdown code blocks.
 "@
-                }
-                
-                Write-Host "[GENERATE] Calling $LLM_PROVIDER to generate final documentation..."
-                $responseContent = Invoke-LLMRequest -UserPrompt $prompt -BaseName $safeBaseName
-                
-                if ($responseContent) {
-                    $validationResult = $responseContent | Select-String -Pattern `
-                        '^##\s', `
-                        '(\bDOI\b|https?://)', `
-                        '\bTable\b'
-                    
-                    if (-not $validationResult) {
-                        throw "Generated content failed quality checks"
-                    }
-                    
-                    if (Write-MarkdownContent -File $file -Content $responseContent) {
-                        Write-Host "[SUCCESS] Processed $($file.Name)"
-                        # Check and fix Mermaid formatting in the file
-                        Write-Host "[MERMAID CHECK] Validating Mermaid charts in $($file.Name)..."
-                        Fix-MermaidFormatting -FilePath $file.FullName
-                        
-                        # Move the processed file to the destination directory
-                        Move-ProcessedFile -File $file
-                        
-                        # Clean up temporary files after successful processing
-                        if ($DEBUG_CONFIG.SaveJsonDumps) {
-                            Write-Host "[CLEANUP] Removing temporary files for $safeBaseName..."
-                            
-                            # Remove content files
-                            Get-ChildItem -Path "Content_*_$safeBaseName.txt" -ErrorAction SilentlyContinue | ForEach-Object {
-                                Remove-Item $_.FullName -Force
-                                Write-Host "[CLEANUP] Removed $($_.Name)"
-                            }
-                            
-                            # Remove search results file
-                            if (Test-Path "Search_$safeBaseName.txt") {
-                                Remove-Item "Search_$safeBaseName.txt" -Force
-                                Write-Host "[CLEANUP] Removed Search_$safeBaseName.txt"
-                            }
-                            
-                            # Remove summary file
-                            if (Test-Path "Summary_$safeBaseName.txt") {
-                                Remove-Item "Summary_$safeBaseName.txt" -Force
-                                Write-Host "[CLEANUP] Removed Summary_$safeBaseName.txt"
-                            }
-                        }
-                    }
-                }
-                
-                Start-Sleep -Seconds 2
             }
-            catch {
-                $errorInfo = @{
-                    File        = $file.Name
-                    Error       = $_.Exception.Message
-                    Timestamp   = Get-Date
-                }
+            Write-Host "[GENERATE] Calling LM Studio to generate final documentation..."
+            $responseContent = Invoke-LMStudioRequest -UserPrompt $prompt -BaseName $safeBaseName
+            
+            if ($responseContent) {
+                $validationResult = $responseContent | Select-String -Pattern `
+                    '^##\s', `
+                    '(\bDOI\b|https?://)', `
+                    '\bTable\b'
                 
-                $errorInfo | ConvertTo-Json -Depth 10 | Out-File "Error_$baseName.json"
-                Write-Error "Processing failed for $baseName. Error details logged."
+                if (-not $validationResult) {
+                    throw "Generated content failed quality checks"
+                }
+
+                if (Write-MarkdownContent -File $file -Content $responseContent) {
+                    Write-Host "[SUCCESS] Processed $($file.Name)"
+                    # Check and fix Mermaid formatting in the file
+                    Write-Host "[MERMAID CHECK] Validating Mermaid charts in $($file.Name)..."
+                    Fix-MermaidFormatting -FilePath $file.FullName
+                    
+                    # Move the processed file to the destination directory
+                    Move-ProcessedFile -File $file
+                    
+                    # Clean up temporary files after successful processing
+                    Write-Host "[CLEANUP] Removing temporary files for $safeBaseName..."
+                    
+                    # Remove content files
+                    Get-ChildItem -Path "Content_*_$safeBaseName.txt" -ErrorAction SilentlyContinue | ForEach-Object {
+                        Remove-Item $_.FullName -Force
+                        Write-Host "[CLEANUP] Removed $($_.Name)"
+                    }
+                    
+                    # Remove search results file
+                    if (Test-Path "Search_$safeBaseName.txt") {
+                        Remove-Item "Search_$safeBaseName.txt" -Force
+                        Write-Host "[CLEANUP] Removed Search_$safeBaseName.txt"
+                    }
+                    
+                    # Remove summary file
+                    if (Test-Path "Summary_$safeBaseName.txt") {
+                        Remove-Item "Summary_$safeBaseName.txt" -Force
+                        Write-Host "[CLEANUP] Removed Summary_$safeBaseName.txt"
+                    }
+                }
             }
             
-            # Post-processing timeout check
-            if ((Get-Date) -ge $timeoutDeadline) {
-                Write-Host "[TIMEOUT] Post-processing timeout reached"
-                Write-Host "Suspending operations for 24 hours..."
-                Start-CountdownTimer -Seconds (24*3600) -Message "Suspension Period"
-                break
-            }
+            Start-Sleep -Seconds 2
         }
-        
-        # Check if we exited due to timeout
-        if ((Get-Date) -lt $timeoutDeadline) {
-            Write-Host "`n[CYCLE COMPLETE] Finished processing all available files within time window"
+        catch {
+            $errorInfo = @{
+                File        = $file.Name
+                Error       = $_.Exception.Message
+                Timestamp   = Get-Date
+            }
+            
+            $errorInfo | ConvertTo-Json -Depth 10 | Out-File "Error_$baseName.json"
+            Write-Error "Processing failed for $baseName. Error details logged."
+        }
+
+        # Post-processing timeout check
+        if ((Get-Date) -ge $timeoutDeadline) {
+            Write-Host "[TIMEOUT] Post-processing timeout reached"
+            Write-Host "Suspending operations for 24 hours..."
+            Start-CountdownTimer -Seconds (0.00001*3600) -Message "Suspension Period"
             break
         }
     }
-    
-    if ($cycleCount -ge $maxCycles) {
-        Write-Warning "Maximum cycle count ($maxCycles) reached. Stopping execution."
-    }
-    
-    Write-Host "`n[FINAL STATUS]"
-    Get-ChildItem *.md | Where-Object {
-        $_ | Select-String -Pattern "# Generated by $($LLM_PROVIDER) LLM"
-    } | ForEach-Object {
-        Write-Host "Processed: $($_.Name)"
+
+    # Check if we exited due to timeout
+    if ((Get-Date) -lt $timeoutDeadline) {
+        Write-Host "`n[CYCLE COMPLETE] Finished processing all available files within time window"
+        break
     }
 }
-catch {
-    Write-Error "Critical error: $($_.Exception.Message)"
-    exit 1
+
+if ($cycleCount -ge $maxCycles) {
+    Write-Warning "Maximum cycle count ($maxCycles) reached. Stopping execution."
 }
+
+Write-Host "`n[FINAL STATUS]"
+Get-ChildItem *.md | Where-Object {
+    $_ | Select-String -Pattern "# Generated by LMStudio Reasoner"
+} | ForEach-Object {
+    Write-Host "Processed: $($_.Name)"
+}
+
