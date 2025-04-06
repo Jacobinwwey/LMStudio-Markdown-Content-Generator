@@ -98,7 +98,7 @@ This PowerShell script (`monitor_script.ps1`) monitors the main Multi-LLM Markdo
 
 ## License
 
-MIT
+This project follows the MIT license, see the LICENSE file for details.
 
 ## Contact
 

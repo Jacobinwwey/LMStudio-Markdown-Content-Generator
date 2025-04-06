@@ -206,7 +206,7 @@ Each processed file includes a footer like this:
 
 ## License
 
-MIT
+This project follows the MIT license, see the LICENSE file for details.
 
 ## Contact
 
