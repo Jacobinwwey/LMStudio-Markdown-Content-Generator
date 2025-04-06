@@ -205,4 +205,10 @@ Each processed file includes a footer like this:
 ```
 
 ## License
-This script is provided as-is with no warranty. Use at your own risk.
+
+MIT
+
+## Contact
+
+jacob.hxx.cn@outlook.com
+```
