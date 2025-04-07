@@ -1,9 +1,9 @@
 # Script to monitor and automatically restart mcp_md_done.ps1 if it exits
-$scriptPath = "your path to\LMStudio-Markdown-Content-Generator\mcp_md_done.ps1"
+$scriptPath = Join-Path $PSScriptRoot "mcp_md_done.ps1"
 $maxRetries = 100000 # Maximum number of restart attempts
 $retryCount = 0
 $waitTime = 5  # Seconds to wait between restart attempts
-$logFile = "your path to\LMStudio-Markdown-Content-Generator\monitor_log.txt"
+$logFile = Join-Path $PSScriptRoot "monitor_log.txt"
 
 # Create or append to log file
 function Write-Log {
@@ -20,7 +20,7 @@ Write-Log "Starting monitoring for $scriptPath"
 Write-Log "Press Ctrl+C to stop monitoring"
 
 # Check if .env file exists and load it
-$envFile = "your path to\LMStudio-Markdown-Content-Generator\.env"
+$envFile = Join-Path $PSScriptRoot ".env"
 if (Test-Path $envFile) {
     Write-Log "Found .env configuration file"
     
