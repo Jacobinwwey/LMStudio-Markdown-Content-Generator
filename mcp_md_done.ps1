@@ -48,6 +48,14 @@ $SCHEDULE_CONFIG = @{
     CheckInterval   = [int]($env:CHECK_INTERVAL ?? 30)
 }
 
+# Token Configuration
+$TOKEN_CONFIG = @{
+    MaxTokens          = [int]($env:MAX_TOKENS ?? 16384)
+    MaxChunkSize       = [int]($env:MAX_CHUNK_SIZE ?? 48000)
+    MinTokenThreshold  = [int]($env:MIN_TOKEN_THRESHOLD ?? 5000)
+    MaxTokenThreshold  = [int]($env:MAX_TOKEN_THRESHOLD ?? 20000)
+}
+
 # LLM Provider Configuration
 $LLM_PROVIDER = $env:LLM_PROVIDER ?? "lmstudio"
 
@@ -83,6 +91,19 @@ $LLM_CONFIG = @{
         ApiKey          = $env:OPENAI_API_KEY
     }
     
+    # OpenRouter Configuration
+    openrouter = @{
+        BaseURL         = $env:OPENROUTER_ENDPOINT ?? "https://openrouter.ai/api/v1/chat/completions"
+        Model           = $env:OPENROUTER_MODEL ?? "deepseek/deepseek-chat-v3-0324:free"
+        FallbackModel   = $env:OPENROUTER_FALLBACK_MODEL ?? "mistralai/mistral-small-3.1-24b-instruct:free"
+        SystemMessage   = "You are a scientific reasoning expert. Analyze from multiple perspectives: physical mechanisms, mathematical models, experimental validation, and practical applications. Maintain rigorous academic standards. Please be extremely strict to mermaid format."
+        MaxTokens       = 16384
+        Temperature     = 0.7
+        TopP            = 0.9
+        FrequencyPenalty = 0.0
+        PresencePenalty = 0.0
+    }
+
     # Anthropic Configuration
     anthropic = @{
         BaseURL         = "https://api.anthropic.com/v1/messages"
@@ -134,13 +155,14 @@ $LLM_CONFIG = @{
     }
 }
 
-# Set active LLM configuration
-$ACTIVE_LLM = $LLM_CONFIG[$LLM_PROVIDER]
+# Set the active LLM configuration
+$ACTIVE_LLM = $LLM_CONFIG[$LLM_PROVIDER.ToLower()]
 if (-not $ACTIVE_LLM) {
-    Write-Error "Invalid LLM provider specified: $LLM_PROVIDER. Defaulting to LM Studio."
+    Write-Warning "Invalid LLM provider: $LLM_PROVIDER. Defaulting to LM Studio."
     $LLM_PROVIDER = "lmstudio"
-    $ACTIVE_LLM = $LLM_CONFIG[$LLM_PROVIDER]
+    $ACTIVE_LLM = $LLM_CONFIG["lmstudio"]
 }
+
 
 # API configuration (for backward compatibility)
 $LMSTUDIO_CONFIG = @{
@@ -197,12 +219,19 @@ function Invoke-LLMRequest {
         [ValidateNotNullOrEmpty()]
         [string]$UserPrompt,
         [Parameter(Mandatory)]
-        [string]$BaseName
+        [string]$BaseName,
+        [string]$SystemMessage = "",
+        [double]$Temperature = -1,
+        [int]$MaxTokens = -1
     )
 
     $retryCount = 0
     $provider = $LLM_PROVIDER.ToLower()
     $config = $ACTIVE_LLM
+    
+    $systemMsg = if ([string]::IsNullOrWhiteSpace($SystemMessage)) { $config.SystemMessage } else { $SystemMessage }
+    $temp = if ($Temperature -lt 0) { $config.Temperature } else { $Temperature }
+    $tokens = if ($MaxTokens -lt 0) { $config.MaxTokens } else { $MaxTokens }
     
     # Set up headers based on provider
     $headers = @{
@@ -236,6 +265,11 @@ function Invoke-LLMRequest {
         "ollama" {
             # Ollama doesn't require authentication
         }
+        "openrouter" {
+            $headers["Authorization"] = "Bearer $($env:OPENROUTER_API_KEY)"
+            $headers["HTTP-Referer"] = "https://localhost"
+            $headers["X-Title"] = "LLMs Markdown Generator"  # Added X-Title header
+        }
     }
 
     do {
@@ -243,8 +277,6 @@ function Invoke-LLMRequest {
             if ($BaseName -match '{|}' -or $BaseName -eq '') {
                 throw "Invalid BaseName contains format specifiers or is empty"
             }
-
-            # Structured prompt remains the same
             $structuredPrompt = @" 
 **Documentation Structure Requirements** 
 1. First line MUST be: ## {0} Analysis 
@@ -294,44 +326,44 @@ graph TD;
                     $body = @{
                         model       = $config.Model
                         messages    = @(
-                            @{ role = "system"; content = $config.SystemMessage }
+                            @{ role = "system"; content = $systemMsg }
                             @{ role = "user"; content = $structuredPrompt + "`n" + $UserPrompt }
                         )
-                        temperature = $config.Temperature
-                        max_tokens  = $config.MaxTokens
+                        temperature = $temp
+                        max_tokens  = $tokens
                     }
                 }
                 "deepseek" {
                     $body = @{
                         model       = $config.Model
                         messages    = @(
-                            @{ role = "system"; content = $config.SystemMessage }
+                            @{ role = "system"; content = $systemMsg }
                             @{ role = "user"; content = $structuredPrompt + "`n" + $UserPrompt }
                         )
-                        temperature = $config.Temperature
-                        max_tokens  = $config.MaxTokens
+                        temperature = $temp
+                        max_tokens  = $tokens
                     }
                 }
                 "openai" {
                     $body = @{
                         model       = $config.Model
                         messages    = @(
-                            @{ role = "system"; content = $config.SystemMessage }
+                            @{ role = "system"; content = $systemMsg }
                             @{ role = "user"; content = $structuredPrompt + "`n" + $UserPrompt }
                         )
-                        temperature = $config.Temperature
-                        max_tokens  = $config.MaxTokens
+                        temperature = $temp
+                        max_tokens  = $tokens
                     }
                 }
                 "anthropic" {
                     $body = @{
                         model       = $config.Model
-                        system      = $config.SystemMessage
+                        system      = $systemMsg
                         messages    = @(
                             @{ role = "user"; content = $structuredPrompt + "`n" + $UserPrompt }
                         )
-                        temperature = $config.Temperature
-                        max_tokens  = $config.MaxTokens
+                        temperature = $temp
+                        max_tokens  = $tokens
                     }
                 }
                 "google" {
@@ -346,11 +378,11 @@ graph TD;
                             }
                         )
                         systemInstruction = @{
-                            text = $config.SystemMessage
+                            text = $systemMsg
                         }
                         generationConfig = @{
-                            temperature = $config.Temperature
-                            maxOutputTokens = $config.MaxTokens
+                            temperature = $temp
+                            maxOutputTokens = $tokens
                         }
                     }
                 }
@@ -358,36 +390,48 @@ graph TD;
                     $body = @{
                         model       = $config.Model
                         messages    = @(
-                            @{ role = "system"; content = $config.SystemMessage }
+                            @{ role = "system"; content = $systemMsg }
                             @{ role = "user"; content = $structuredPrompt + "`n" + $UserPrompt }
                         )
-                        temperature = $config.Temperature
-                        max_tokens  = $config.MaxTokens
+                        temperature = $temp
+                        max_tokens  = $tokens
                     }
                 }
                 "azure_openai" {
                     $uri = "$($config.BaseURL)/openai/deployments/$($config.Model)/chat/completions?api-version=$($config.ApiVersion)"
                     $body = @{
                         messages    = @(
-                            @{ role = "system"; content = $config.SystemMessage }
+                            @{ role = "system"; content = $systemMsg }
                             @{ role = "user"; content = $structuredPrompt + "`n" + $UserPrompt }
                         )
-                        temperature = $config.Temperature
-                        max_tokens  = $config.MaxTokens
+                        temperature = $temp
+                        max_tokens  = $tokens
                     }
                 }
                 "ollama" {
                     $body = @{
                         model       = $config.Model
                         messages    = @(
-                            @{ role = "system"; content = $config.SystemMessage }
+                            @{ role = "system"; content = $systemMsg }
                             @{ role = "user"; content = $structuredPrompt + "`n" + $UserPrompt }
                         )
                         options     = @{
-                            temperature = $config.Temperature
-                            num_predict = $config.MaxTokens
+                            temperature = $temp
+                            num_predict = $tokens
                         }
                         stream      = $false
+                    }
+                }
+                "openrouter" {
+                    $body = @{
+                        model       = $config.Model
+                        messages    = @(
+                            @{ role = "system"; content = $systemMsg }
+                            @{ role = "user"; content = $structuredPrompt + "`n" + $UserPrompt }
+                        )
+                        temperature = $temp
+                        max_tokens  = $tokens
+                        fallbacks   = @($config.FallbackModel)
                     }
                 }
             }
@@ -465,6 +509,13 @@ graph TD;
                         throw "Invalid API response structure. Full response:`n$responseJson"
                     }
                     $content = $response.message.content
+                }
+                "openrouter" {
+                    if (-not $response.choices) {
+                        $responseJson = $response | ConvertTo-Json -Depth 10
+                        throw "Invalid API response structure. Full response:`n$responseJson"
+                    }
+                    $content = $response.choices[0].message.content
                 }
             }
 
@@ -766,10 +817,13 @@ function Move-ProcessedFile {
     }
 }
 
+
+# Update the Test-LLMConnection function to support OpenRouter
 function Test-LLMConnection {
     [CmdletBinding()]
     param()
     try {
+        Write-Host "Running API connectivity tests..."
         $provider = $LLM_PROVIDER.ToLower()
         $config = $ACTIVE_LLM
         
@@ -782,9 +836,19 @@ function Test-LLMConnection {
         switch ($provider) {
             "lmstudio" {
                 # Verify local port first for LM Studio
-                $portTest = Test-NetConnection -ComputerName localhost -Port 301 -ErrorAction Stop
-                if (-not $portTest.TcpTestSucceeded) {
-                    throw "LM Studio API port 301 not accessible"
+                try {
+                    $uri = $config.BaseURL
+                    $testResponse = Invoke-WebRequest -Uri $uri -Method Head -TimeoutSec 10 -ErrorAction Stop
+                    Write-Host "[Network Diagnostic] LM Studio endpoint is accessible"
+                }
+                catch {
+                    Write-Host "[Network Diagnostic] Unable to connect to LM Studio at $uri"
+                    Write-Host "Local Service Checks:"
+                    Write-Error "API connection failed. Check:
+1. LM Studio is running
+2. Correct port configuration (default: 1234)
+3. Base URL: $($config.BaseURL)"
+                    return $false
                 }
                 $headers["Authorization"] = "Bearer $($env:LMSTUDIO_API_KEY)"
             }
@@ -793,6 +857,11 @@ function Test-LLMConnection {
             }
             "openai" {
                 $headers["Authorization"] = "Bearer $($env:OPENAI_API_KEY)"
+            }
+            "openrouter" {
+                $headers["Authorization"] = "Bearer $($env:OPENROUTER_API_KEY)"
+                $headers["HTTP-Referer"] = "https://localhost"  
+                $headers["X-Title"] = "LLMs Markdown Content Generator"
             }
             "anthropic" {
                 $headers["x-api-key"] = "$($env:ANTHROPIC_API_KEY)"
@@ -810,9 +879,20 @@ function Test-LLMConnection {
             "ollama" {
                 # Ollama doesn't require authentication
                 # Check if Ollama is running on the default port
-                $portTest = Test-NetConnection -ComputerName localhost -Port 11434 -ErrorAction Stop
-                if (-not $portTest.TcpTestSucceeded) {
-                    throw "Ollama API port 11434 not accessible"
+                try {
+                    $portTest = Test-NetConnection -ComputerName localhost -Port 11434 -ErrorAction Stop
+                    if (-not $portTest.TcpTestSucceeded) {
+                        throw "Ollama API port 11434 not accessible"
+                    }
+                }
+                catch {
+                    Write-Host "[Network Diagnostic] Unable to connect to Ollama at localhost:11434"
+                    Write-Host "Local Service Checks:"
+                    Write-Error "API connection failed. Check:
+1. Ollama is running
+2. Correct port configuration (default: 11434)
+3. Base URL: $($config.BaseURL)"
+                    return $false
                 }
             }
         }
@@ -842,6 +922,15 @@ function Test-LLMConnection {
                 }
             }
             "openai" {
+                $body = @{
+                    model       = $config.Model
+                    messages    = @(
+                        @{ role = "user"; content = "Connection test" }
+                    )
+                    max_tokens  = 1
+                }
+            }
+            "openrouter" {
                 $body = @{
                     model       = $config.Model
                     messages    = @(
@@ -907,19 +996,55 @@ function Test-LLMConnection {
             }
         }
 
+        # Check if API key is empty or missing for providers that require it
+        if ($provider -ne "lmstudio" -and $provider -ne "ollama") {
+            $apiKey = switch ($provider) {
+                "openai" { $env:OPENAI_API_KEY }
+                "deepseek" { $env:DEEPSEEK_API_KEY }
+                "anthropic" { $env:ANTHROPIC_API_KEY }
+                "google" { $env:GOOGLE_API_KEY }
+                "mistral" { $env:MISTRAL_API_KEY }
+                "azure_openai" { $env:AZURE_OPENAI_API_KEY }
+                "openrouter" { $env:OPENROUTER_API_KEY }
+            }
+            
+            if ([string]::IsNullOrWhiteSpace($apiKey)) {
+                Write-Host "[Network Diagnostic] API key for $provider is missing or empty"
+                Write-Host "Local Service Checks:"
+                Write-Error "API connection failed. Check:
+1. API key validity
+2. Network connectivity
+3. Base URL: $uri"
+                return $false
+            }
+        }
+
         # Make the API request
+        Write-Host "Testing connection to $uri"
         $response = Invoke-RestMethod -Uri $uri `
             -Method Post `
             -Headers $headers `
             -Body ($body | ConvertTo-Json -Depth 10) `
-            -TimeoutSec 5 `
+            -TimeoutSec 30 `
             -ErrorAction Stop
         
+        Write-Host "API connection successful!"
         return $true
     }
     catch {
         Write-Host "[Network Diagnostic]"
         Write-Host "Error: $($_.Exception.Message)"
+        
+        # More detailed error information
+        if ($_.Exception.Response) {
+            $statusCode = $_.Exception.Response.StatusCode.value__
+            $statusDescription = $_.Exception.Response.StatusDescription
+            Write-Host "Status Code: $statusCode - $statusDescription"
+            
+            if ($statusCode -eq 401) {
+                Write-Host "Authentication error: Please check your API key for $provider"
+            }
+        }
         
         # Check for provider-specific processes
         Write-Host "Local Service Checks:"
@@ -943,6 +1068,11 @@ function Test-LLMConnection {
                 }
             }
         }
+        
+        Write-Error "API connection failed. Check:
+1. API key validity
+2. Network connectivity
+3. Base URL: $uri"
         return $false
     }
 }
@@ -1669,12 +1799,7 @@ function Extract-TextFromHtml {
     )
     
     try {
-        # Safety check for empty or null HTML
-        if ([string]::IsNullOrEmpty($Html)) {
-            return "No content to extract"
-        }
-        
-        # Create HTML document object
+        # Load HTML content
         $htmlDoc = New-Object -ComObject "HTMLFile"
         
         # Method depends on PowerShell version
@@ -1684,28 +1809,70 @@ function Extract-TextFromHtml {
         }
         catch {
             # For older PowerShell versions
-            try {
-                $htmlDoc.IHTMLDocument2_write($Html)
-            } catch {
-                return "Unable to parse HTML content"
-            }
+            $htmlDoc.IHTMLDocument2_write($Html)
         }
         
-        # Extract text content with error handling
-        try {
-            $bodyText = $htmlDoc.body.innerText
+        # Extract text from body
+        $body = $htmlDoc.body
+        if ($body) {
+            # Get all text nodes
+            $text = $body.innerText
             
             # Clean up the text
-            $cleanText = $bodyText -replace '\r\n\s*\r\n', "`n`n" -replace '\s{3,}', "`n" -replace '^\s+|\s+$', ''
+            $text = $text -replace '\r\n', "`n"
+            $text = $text -replace '\n{3,}', "`n`n"
             
-            return $cleanText
-        } catch {
-            return "Error extracting text from HTML body"
+            return $text
         }
+        
+        return "No content could be extracted from HTML"
     }
     catch {
         Write-Error "Error extracting text from HTML: $($_.Exception.Message)"
-        return "Error extracting text: $($_.Exception.Message)"
+        return "Error extracting text from HTML: $($_.Exception.Message)"
+    }
+}
+
+function Invoke-SummarizationRequest {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Prompt,
+        [Parameter(Mandatory)]
+        [string]$BaseName,
+        [bool]$IsIntermediate = $false
+    )
+    
+    try {
+        # Calculate approximate token count (rough estimate: 4 chars = 1 token)
+        $estimatedTokens = [Math]::Ceiling($Prompt.Length / 4)
+        # Use configurable token limits
+        $maxOutputTokens = $TOKEN_CONFIG.MaxTokens
+        
+        # Add validation to ensure token count is appropriate
+        if ($estimatedTokens -lt $TOKEN_CONFIG.MinTokenThreshold -and $IsIntermediate) {
+            Write-Warning "Input tokens during summary can be greater than $($TOKEN_CONFIG.MinTokenThreshold) but need to be less than $($TOKEN_CONFIG.MaxTokenThreshold). Current estimated input tokens: $estimatedTokens is too small."
+        }
+        
+        Write-Host "[INFO] Estimated input tokens: $estimatedTokens, Max output tokens: $maxOutputTokens"
+        
+        # System message for summarization
+        $systemMessage = "You are a scientific research assistant tasked with summarizing technical content. Prioritize mathematical accuracy, preserve all formulas in LaTeX format, maintain scientific rigor, and ensure all technical principles are explained with their mathematical foundations. Never simplify or omit mathematical details."
+        
+        # Use the configured LLM provider instead of hardcoding LM Studio
+        $result = Invoke-LLMRequest -UserPrompt $Prompt -BaseName $BaseName -SystemMessage $systemMessage -Temperature 0.2 -MaxTokens $maxOutputTokens
+        
+        if ($IsIntermediate) {
+            Write-Host "[INFO] Intermediate summary generated successfully."
+        } else {
+            Write-Host "[SUMMARY] Search summary generated successfully."
+        }
+        
+        return $result
+    }
+    catch {
+        Write-Error "Error in summarization: $($_.Exception.Message)"
+        return "Error generating summary: $($_.Exception.Message)"
     }
 }
 
@@ -1719,7 +1886,7 @@ function Get-SearchSummary {
     )
     
     try {
-        Write-Host "[SUMMARY] Generating search summary for $BaseName using LM Studio..."
+        Write-Host "[SUMMARY] Generating search summary for $BaseName using $($env:LLM_PROVIDER)..."
         
         # Check if we have any useful content
         $validContentCount = ($ContentDetails | Where-Object { $_ -notmatch "Content skipped:" }).Count
@@ -1750,15 +1917,15 @@ Maintain scientific rigor by:
 
 Keep the summary concise but scientifically accurate, focusing on the most relevant technical information.
 "@
-            # Call LM Studio with just the search results
-            return Invoke-LMStudioSummarization -Prompt $summaryPrompt -BaseName $BaseName
+            # Call the configured LLM provider with just the search results
+            return Invoke-SummarizationRequest -Prompt $summaryPrompt -BaseName $BaseName
         } else {
             Write-Host "[INFO] Retrieved valid content from $validContentCount sources"
             
             
             # Process content in chunks to avoid exceeding API limits
-            # Increased chunk size to get between 8192-16384 tokens (approx. 32000-64000 chars)
-            $maxChunkSize = 48000  # Characters per chunk (approx. 12000 tokens)
+            # Use configurable chunk size from TOKEN_CONFIG
+            $maxChunkSize = $TOKEN_CONFIG.MaxChunkSize
             $chunks = @()
             $currentChunk = ""
             $chunkCounter = 1
@@ -1821,7 +1988,7 @@ Create a focused summary of just this content chunk that includes:
 Keep the summary concise but retain all technical details and mathematical precision.
 "@
                 
-                $chunkSummary = Invoke-LMStudioSummarization -Prompt $chunkPrompt -BaseName "$($BaseName)_chunk$($i+1)" -IsIntermediate $true
+                $chunkSummary = Invoke-SummarizationRequest -Prompt $chunkPrompt -BaseName "$($BaseName)_chunk$($i+1)" -IsIntermediate $true
                 if ($chunkSummary -match "Error|Unable to generate") {
                     Write-Warning "Failed to summarize chunk $($i+1). Using truncated version instead."
                     # If summarization fails, use a truncated version of the chunk
@@ -1859,7 +2026,7 @@ Keep the summary concise but scientifically accurate, focusing on the most relev
 "@
             
             Write-Host "[SUMMARY] Generating final summary from $($intermediateSummaries.Count) intermediate summaries..."
-            return Invoke-LMStudioSummarization -Prompt $finalPrompt -BaseName $BaseName
+            return Invoke-SummarizationRequest -Prompt $finalPrompt -BaseName $BaseName
         }
     }
     catch {
@@ -1972,12 +2139,12 @@ function Invoke-LMStudioSummarization {
     try {
         # Calculate approximate token count (rough estimate: 4 chars = 1 token)
         $estimatedTokens = [Math]::Ceiling($Prompt.Length / 4)
-        # Increased token limits for both intermediate and final summaries
-        $maxOutputTokens = if ($IsIntermediate) { 16384 } else { 16384 }
+        # Use configurable token limits
+        $maxOutputTokens = $TOKEN_CONFIG.MaxTokens
         
         # Add validation to ensure token count is appropriate
-        if ($estimatedTokens -lt 10000 -and $IsIntermediate) {
-            Write-Host "[WARNING] Input tokens during summary can be greater than 10000 but need to be less than 20000. current Estimated input tokens: $estimatedTokens is too small."
+        if ($estimatedTokens -lt $TOKEN_CONFIG.MinTokenThreshold -and $IsIntermediate) {
+            Write-Warning "Input tokens during summary can be greater than $($TOKEN_CONFIG.MinTokenThreshold) but need to be less than $($TOKEN_CONFIG.MaxTokenThreshold). current Estimated input tokens: $estimatedTokens is too small."
         }
         
         Write-Host "[INFO] Estimated input tokens: $estimatedTokens, Max output tokens: $maxOutputTokens"
